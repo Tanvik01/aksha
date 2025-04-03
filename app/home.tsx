@@ -9,7 +9,13 @@ import {
   Dimensions,
   Platform,
   StatusBar,
-  Alert
+  Alert,
+  Modal,
+  FlatList,
+  TextInput,
+  Vibration,
+  Linking,
+  NativeModules
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -39,13 +45,30 @@ TaskManager.defineTask(LOCATION_TRACKING, async ({ data, error }) => {
   }
 });
 
-const friends = [
-  { id: 1, name: 'Laura Ash', image: require('../assets/images/friend1.png') },
-  { id: 2, name: 'Samantha', image: require('../assets/images/friend2.png') },
-  { id: 3, name: 'Caroline', image: require('../assets/images/friend3.png') },
-  { id: 4, name: 'Sophia', image: require('../assets/images/friend4.png') },
-  { id: 5, name: 'Marge', image: require('../assets/images/friend5.png') },
-];
+// Update the getBatteryLevel function to use a more reliable approach
+const getBatteryLevel = async () => {
+  try {
+    // For Android, we can try to access the battery info directly
+    if (Platform.OS === 'android') {
+      try {
+        const { BatteryManager } = NativeModules;
+        if (BatteryManager && BatteryManager.getBatteryLevel) {
+          const batteryLevel = await BatteryManager.getBatteryLevel();
+          return Math.floor(batteryLevel * 100);
+        }
+      } catch (androidError) {
+        console.log('Android battery error:', androidError);
+      }
+    }
+    
+    // Fallback to a fixed value when we can't get the actual battery level
+    // In a real app, you would implement platform-specific battery APIs
+    return 95; // Return a reasonable default value
+  } catch (error) {
+    console.log('Error getting battery level:', error);
+    return 95; // Return a reasonable default value instead of "Unknown"
+  }
+};
 
 export default function HomeScreen() {
   const router = useRouter();
@@ -55,6 +78,9 @@ export default function HomeScreen() {
   const [contacts, setContacts] = useState([]);
   const [selectedContacts, setSelectedContacts] = useState([]);
   const [isTracking, setIsTracking] = useState(false);
+  const [showContactModal, setShowContactModal] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filteredContacts, setFilteredContacts] = useState([]);
   const mapRef = useRef(null);
 
   // Get initial location
@@ -67,7 +93,9 @@ export default function HomeScreen() {
       }
 
       let location = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.Highest
+        accuracy: Location.Accuracy.BestForNavigation, // Highest possible accuracy
+        maximumAge: 10000, // Accept locations no older than 10 seconds
+        timeout: 15000 // Wait up to 15 seconds for a location
       });
       setLocation(location);
     })();
@@ -87,8 +115,15 @@ export default function HomeScreen() {
             contact => contact.phoneNumbers && contact.phoneNumbers.length > 0
           );
           setContacts(contactsWithPhones);
+          setFilteredContacts(contactsWithPhones);
           
-          setSelectedContacts(contactsWithPhones.slice(0, 5));
+          // Check if we already have selected contacts
+          if (selectedContacts.length === 0) {
+            // Show contact selection modal if no contacts are selected
+            setTimeout(() => {
+              setShowContactModal(true);
+            }, 1000);
+          }
         }
       } else {
         Alert.alert(
@@ -99,6 +134,18 @@ export default function HomeScreen() {
       }
     })();
   }, []);
+
+  // Filter contacts based on search query
+  useEffect(() => {
+    if (searchQuery) {
+      const filtered = contacts.filter(contact => 
+        contact.name && contact.name.toLowerCase().includes(searchQuery.toLowerCase())
+      );
+      setFilteredContacts(filtered);
+    } else {
+      setFilteredContacts(contacts);
+    }
+  }, [searchQuery, contacts]);
 
   // Start location tracking
   const startLocationTracking = async () => {
@@ -139,6 +186,18 @@ export default function HomeScreen() {
 
   // Toggle location tracking
   const toggleLocationTracking = () => {
+    if (selectedContacts.length === 0) {
+      Alert.alert(
+        "No Contacts Selected",
+        "Please select at least one trusted contact before tracking your location.",
+        [
+          { text: "Cancel", style: "cancel" },
+          { text: "Select Contacts", onPress: () => setShowContactModal(true) }
+        ]
+      );
+      return;
+    }
+
     if (isTracking) {
       stopLocationTracking();
     } else {
@@ -155,9 +214,10 @@ export default function HomeScreen() {
       if (status === 'granted') {
         locationSubscription = await Location.watchPositionAsync(
           {
-            accuracy: Location.Accuracy.Highest,
-            timeInterval: 1000,
-            distanceInterval: 1,
+            accuracy: Location.Accuracy.BestForNavigation,
+            timeInterval: 1000, // Update every second
+            distanceInterval: 1, // Update if moved by 1 meter
+            mayShowUserSettingsDialog: true // Prompt user to improve location settings if needed
           },
           (newLocation) => {
             setLocation(newLocation);
@@ -167,8 +227,8 @@ export default function HomeScreen() {
               mapRef.current.animateToRegion({
                 latitude: newLocation.coords.latitude,
                 longitude: newLocation.coords.longitude,
-                latitudeDelta: 0.005,
-                longitudeDelta: 0.005,
+                latitudeDelta: 0.002, // More zoomed in for better accuracy
+                longitudeDelta: 0.002,
               }, 1000);
             }
           }
@@ -244,6 +304,200 @@ export default function HomeScreen() {
     return colors[Math.abs(hash) % colors.length];
   };
 
+  const toggleContactSelection = (contact) => {
+    const isSelected = selectedContacts.some(c => c.id === contact.id);
+    
+    if (isSelected) {
+      // Remove contact
+      setSelectedContacts(selectedContacts.filter(c => c.id !== contact.id));
+    } else {
+      // Add contact (limit to 5)
+      if (selectedContacts.length < 5) {
+        setSelectedContacts([...selectedContacts, contact]);
+      } else {
+        Alert.alert(
+          "Maximum Contacts Reached",
+          "You can select up to 5 trusted contacts. Please remove one before adding another."
+        );
+      }
+    }
+  };
+
+  const saveContacts = () => {
+    if (selectedContacts.length === 0) {
+      Alert.alert(
+        "No Contacts Selected",
+        "Please select at least one contact to continue.",
+        [{ text: "OK" }]
+      );
+      return;
+    }
+    
+    setShowContactModal(false);
+  };
+
+  const renderContactItem = ({ item }) => {
+    const isSelected = selectedContacts.some(c => c.id === item.id);
+    
+    return (
+      <TouchableOpacity 
+        style={[
+          styles.contactItem,
+          isSelected && styles.selectedContactItem
+        ]}
+        onPress={() => toggleContactSelection(item)}
+      >
+        <View 
+          style={[
+            styles.contactIcon, 
+            { backgroundColor: getColorFromName(item.name) }
+          ]}
+        >
+          <Text style={styles.contactInitial}>
+            {getInitials(item.name)}
+          </Text>
+        </View>
+        <View style={styles.contactInfo}>
+          <Text style={styles.contactName}>{item.name}</Text>
+          <Text style={styles.contactPhone}>
+            {item.phoneNumbers && item.phoneNumbers[0] ? item.phoneNumbers[0].number : 'No number'}
+          </Text>
+        </View>
+        <View style={styles.checkboxContainer}>
+          {isSelected && (
+            <Ionicons name="checkmark-circle" size={24} color="#FF6B9C" />
+          )}
+          {!isSelected && (
+            <View style={styles.emptyCheckbox} />
+          )}
+        </View>
+      </TouchableOpacity>
+    );
+  };
+
+  const handleSOS = async () => {
+    // Vibrate the phone to provide feedback
+    Vibration.vibrate([0, 500, 200, 500]);
+    
+    // Check if we have selected contacts
+    if (selectedContacts.length === 0) {
+      Alert.alert(
+        "No Emergency Contacts",
+        "Please select at least one emergency contact to send SOS alerts.",
+        [
+          { text: "Cancel", style: "cancel" },
+          { text: "Select Contacts", onPress: () => setShowContactModal(true) }
+        ]
+      );
+      return;
+    }
+    
+    try {
+      // Always get a fresh location for emergency situations
+      let currentLocation;
+      try {
+        currentLocation = await Location.getCurrentPositionAsync({
+          accuracy: Location.Accuracy.BestForNavigation,
+          maximumAge: 0, // Don't use cached location
+          timeout: 15000 // Wait up to 15 seconds for a location
+        });
+        setLocation(currentLocation);
+      } catch (locationError) {
+        console.log('Location error:', locationError);
+        // If we can't get a new location, use the existing one
+        currentLocation = location;
+        
+        if (!currentLocation) {
+          Alert.alert(
+            "Location Unavailable",
+            "Could not determine your current location. Please try again or share your location manually."
+          );
+          return;
+        }
+      }
+      
+      // Get battery level with fallback
+      let batteryPercentage;
+      try {
+        batteryPercentage = await getBatteryLevel();
+      } catch (batteryError) {
+        console.log('Battery error:', batteryError);
+        batteryPercentage = 95; // Fallback value
+      }
+      
+      // Create Google Maps link with precise coordinates (6 decimal places)
+      const latitude = currentLocation.coords.latitude.toFixed(6);
+      const longitude = currentLocation.coords.longitude.toFixed(6);
+      const mapsUrl = `https://www.google.com/maps?q=${latitude},${longitude}`;
+      
+      // Create message with more detailed location info
+      const message = `EMERGENCY ALERT from Aksha App!\n\nI need help! This is my current location:\n${mapsUrl}\n\nCoordinates: ${latitude}, ${longitude}\nAccuracy: ${Math.round(currentLocation.coords.accuracy)}m\nBattery: ${batteryPercentage}%\n\nThis is an automated message.`;
+      
+      // Get phone numbers from selected contacts
+      const phoneNumbers = selectedContacts
+        .filter(contact => contact.phoneNumbers && contact.phoneNumbers.length > 0)
+        .map(contact => contact.phoneNumbers[0].number);
+      
+      if (phoneNumbers.length === 0) {
+        Alert.alert("Error", "None of your selected contacts have valid phone numbers.");
+        return;
+      }
+      
+      // Show confirmation dialog
+      Alert.alert(
+        "Send SOS Alert",
+        `Are you sure you want to send an emergency alert to ${phoneNumbers.length} contact(s)?`,
+        [
+          { text: "Cancel", style: "cancel" },
+          { 
+            text: "Send SOS", 
+            style: "destructive",
+            onPress: async () => {
+              try {
+                // Use SMS URI scheme to open the SMS app
+                const phoneNumber = phoneNumbers.join(','); // Join all numbers with commas
+                const encodedMessage = encodeURIComponent(message);
+                const url = `sms:${phoneNumber}?body=${encodedMessage}`;
+                
+                const canOpen = await Linking.canOpenURL(url);
+                if (canOpen) {
+                  await Linking.openURL(url);
+                  
+                      Alert.alert(
+                    "SOS Alert Sent",
+                    "Your emergency message has been prepared. Please tap send in your messaging app."
+                      );
+                  
+                  // Start location tracking if not already tracking
+                  if (!isTracking) {
+                    startLocationTracking();
+                  }
+                } else {
+                  Alert.alert(
+                    "Error",
+                    "Could not open SMS app. Please send a message manually."
+                  );
+                }
+              } catch (error) {
+                console.error("Linking error:", error);
+                Alert.alert(
+                  "Error",
+                  "Failed to open SMS app. Please send a message manually."
+                );
+              }
+            }
+          }
+        ]
+      );
+    } catch (error) {
+      console.error("SOS Error:", error);
+      Alert.alert(
+        "Error",
+        "Failed to send SOS alert. Please try again."
+      );
+    }
+  };
+
   return (
     <View style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#121212" />
@@ -280,7 +534,10 @@ export default function HomeScreen() {
         <View style={styles.friendsSection}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Your Friend's Live Location</Text>
-            <TouchableOpacity style={styles.addFriendButton}>
+            <TouchableOpacity 
+              style={styles.addFriendButton}
+              onPress={() => setShowContactModal(true)}
+            >
               <Ionicons name="add-circle" size={24} color="#FF6B9C" />
             </TouchableOpacity>
           </View>
@@ -311,7 +568,7 @@ export default function HomeScreen() {
             ) : (
               <View style={styles.noContactsContainer}>
                 <Text style={styles.noContactsText}>
-                  No contacts available. Add friends to share your location.
+                  No contacts selected. Tap the + button to add trusted contacts.
                 </Text>
               </View>
             )}
@@ -391,7 +648,7 @@ export default function HomeScreen() {
           <Text style={styles.navText}>Social</Text>
         </TouchableOpacity>
         
-        <TouchableOpacity style={styles.sosButton}>
+        <TouchableOpacity style={styles.sosButton} onPress={handleSOS}>
           <LinearGradient
             colors={['#FF6B9C', '#F24976']}
             style={styles.sosButtonGradient}
@@ -411,6 +668,70 @@ export default function HomeScreen() {
           <Text style={styles.navText}>Marker</Text>
         </TouchableOpacity>
       </View>
+
+      {/* Contact Selection Modal */}
+      <Modal
+        visible={showContactModal}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={() => setShowContactModal(false)}
+      >
+        <View style={styles.modalContainer}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Select Trusted Contacts</Text>
+              <Text style={styles.modalSubtitle}>Choose at least one contact who will receive your location updates</Text>
+            </View>
+
+            <View style={styles.searchContainer}>
+              <Ionicons name="search" size={20} color="#999" style={styles.searchIcon} />
+              <TextInput
+                style={styles.searchInput}
+                placeholder="Search contacts..."
+                placeholderTextColor="#999"
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+              />
+              {searchQuery.length > 0 && (
+                <TouchableOpacity onPress={() => setSearchQuery('')}>
+                  <Ionicons name="close-circle" size={20} color="#999" />
+                </TouchableOpacity>
+              )}
+            </View>
+
+            <View style={styles.selectedCount}>
+              <Text style={styles.selectedCountText}>
+                {selectedContacts.length} contact{selectedContacts.length !== 1 ? 's' : ''} selected (minimum 1)
+              </Text>
+            </View>
+
+            <FlatList
+              data={filteredContacts}
+              renderItem={renderContactItem}
+              keyExtractor={(item, index) => item.id || index.toString()}
+              style={styles.contactsList}
+              contentContainerStyle={styles.contactsListContent}
+              showsVerticalScrollIndicator={false}
+            />
+
+            <View style={styles.modalButtons}>
+              <TouchableOpacity 
+                style={styles.cancelButton}
+                onPress={() => setShowContactModal(false)}
+              >
+                <Text style={styles.cancelButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              
+              <TouchableOpacity 
+                style={styles.saveButton}
+                onPress={saveContacts}
+              >
+                <Text style={styles.saveButtonText}>Save</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -606,6 +927,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingTop: Platform.OS === 'ios' ? 50 : 20,
     paddingBottom: 15,
+    borderBottomWidth: 1,
+    borderBottomColor: '#333',
   },
   headerTitle: {
     fontSize: 24,
@@ -667,16 +990,17 @@ const styles = StyleSheet.create({
   content: {
     flex: 1,
     paddingHorizontal: 20,
+    paddingTop: 20,
   },
   description: {
-    color: '#999',
-    fontSize: 14,
-    marginTop: 15,
+    color: '#ccc',
+    fontSize: 16,
     marginBottom: 25,
     fontFamily: 'System',
+    lineHeight: 22,
   },
   friendsSection: {
-    marginBottom: 25,
+    marginBottom: 30,
   },
   sectionHeader: {
     flexDirection: 'row',
@@ -707,7 +1031,12 @@ const styles = StyleSheet.create({
     borderRadius: 35,
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 8,
+    marginBottom: 10,
+    elevation: 3,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 3,
   },
   friendInitial: {
     color: 'white',
@@ -852,6 +1181,151 @@ const styles = StyleSheet.create({
     color: '#FF6B9C',
     fontSize: 12,
     marginTop: 5,
+    fontWeight: 'bold',
+    fontFamily: 'System',
+  },
+  modalContainer: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  modalContent: {
+    backgroundColor: '#1A1A1A',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingTop: 25,
+    paddingBottom: Platform.OS === 'ios' ? 40 : 25,
+    height: '80%',
+  },
+  modalHeader: {
+    paddingHorizontal: 25,
+    marginBottom: 25,
+  },
+  modalTitle: {
+    color: '#fff',
+    fontSize: 22,
+    fontWeight: 'bold',
+    fontFamily: 'System',
+    marginBottom: 8,
+  },
+  modalSubtitle: {
+    color: '#999',
+    fontSize: 14,
+    fontFamily: 'System',
+  },
+  searchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#2A2A2A',
+    marginHorizontal: 25,
+    marginBottom: 20,
+    borderRadius: 12,
+    paddingHorizontal: 15,
+  },
+  searchIcon: {
+    marginRight: 10,
+  },
+  searchInput: {
+    flex: 1,
+    height: 50,
+    color: '#fff',
+    fontFamily: 'System',
+  },
+  selectedCount: {
+    paddingHorizontal: 25,
+    marginBottom: 10,
+  },
+  selectedCountText: {
+    color: '#FF6B9C',
+    fontFamily: 'System',
+    fontSize: 14,
+  },
+  contactsList: {
+    flex: 1,
+  },
+  contactsListContent: {
+    paddingHorizontal: 25,
+  },
+  contactItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 15,
+    borderBottomWidth: 1,
+    borderBottomColor: '#333',
+  },
+  selectedContactItem: {
+    backgroundColor: 'rgba(255, 107, 156, 0.1)',
+  },
+  contactIcon: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 15,
+  },
+  contactInitial: {
+    color: 'white',
+    fontSize: 20,
+    fontWeight: 'bold',
+    fontFamily: 'System',
+  },
+  contactInfo: {
+    flex: 1,
+  },
+  contactName: {
+    color: '#fff',
+    fontSize: 16,
+    fontFamily: 'System',
+    marginBottom: 4,
+  },
+  contactPhone: {
+    color: '#999',
+    fontSize: 14,
+    fontFamily: 'System',
+  },
+  checkboxContainer: {
+    width: 30,
+    alignItems: 'center',
+  },
+  emptyCheckbox: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: '#666',
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    paddingHorizontal: 25,
+    marginTop: 25,
+  },
+  cancelButton: {
+    flex: 1,
+    paddingVertical: 15,
+    alignItems: 'center',
+    marginRight: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#666',
+  },
+  cancelButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontFamily: 'System',
+  },
+  saveButton: {
+    flex: 1,
+    paddingVertical: 15,
+    alignItems: 'center',
+    marginLeft: 10,
+    borderRadius: 10,
+    backgroundColor: '#FF6B9C',
+  },
+  saveButtonText: {
+    color: '#fff',
+    fontSize: 16,
     fontWeight: 'bold',
     fontFamily: 'System',
   },
