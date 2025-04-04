@@ -54,35 +54,51 @@ const apiClient = {
     endpoint: string,
     options: RequestInit = {}
   ): Promise<T> => {
-    const token = await apiClient.getAuthToken();
-    
-    // Prepare headers with authentication token
-    const headers = {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...options.headers,
-    };
-
-    // Make the fetch request
-    const response = await fetch(`${API_URL}${endpoint}`, {
-      ...options,
-      headers,
-    });
-
-    // Parse response
-    const data = await response.json();
-
-    // Handle non-success status codes
-    if (!response.ok) {
-      // Special handling for 401 Unauthorized (invalid/expired token)
-      if (response.status === 401) {
-        await apiClient.clearAuthToken();
-      }
+    try {
+      const token = await apiClient.getAuthToken();
       
-      throw new Error(data.message || 'API request failed');
-    }
+      // Prepare headers with authentication token
+      const headers = {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...options.headers,
+      };
 
-    return data as T;
+      // Debug log
+      console.log(`Making request to ${API_URL}${endpoint}`);
+      console.log('Headers:', headers);
+      console.log('Body:', options.body);
+
+      // Make the fetch request
+      const response = await fetch(`${API_URL}${endpoint}`, {
+        ...options,
+        headers,
+      });
+
+      // Debug log the response
+      console.log(`Response status: ${response.status}`);
+      
+      // Parse response
+      const data = await response.json();
+      
+      // Debug log the data
+      console.log('Response data:', data);
+
+      // Handle non-success status codes
+      if (!response.ok) {
+        // Special handling for 401 Unauthorized (invalid/expired token)
+        if (response.status === 401) {
+          await apiClient.clearAuthToken();
+        }
+        
+        throw new Error(data.message || 'API request failed');
+      }
+
+      return data as T;
+    } catch (error) {
+      console.error(`API request to ${endpoint} failed:`, error);
+      throw error;
+    }
   },
 
   // Convenience methods for different HTTP methods
@@ -94,6 +110,10 @@ const apiClient = {
       ...options, 
       method: 'POST', 
       body: JSON.stringify(body),
+      headers: {
+        'Content-Type': 'application/json',
+        ...(options?.headers || {}),
+      }
     }),
     
   put: <T>(endpoint: string, body: any, options?: RequestInit) => 

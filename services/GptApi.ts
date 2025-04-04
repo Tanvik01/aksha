@@ -1,122 +1,51 @@
-import apiClient from '../constants/Api';
-import { getGptResponse, getEmergencyGuidance } from './FourOhMiniApi';
+/**
+ * Mock GPT API Service
+ * Provides offline responses without requiring internet connectivity
+ */
 
-export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant';
+// Interface for response
+interface GptResponse {
   content: string;
-  timestamp?: Date;
+  success: boolean;
 }
 
-interface ChatResponse {
-  response: string;
-  messages?: ChatMessage[];
+/**
+ * Provide a mock response that simulates an AI model
+ */
+export async function getGptResponse(userPrompt: string): Promise<GptResponse> {
+  console.log('Processing user query locally:', userPrompt);
+  
+  // Convert prompt to lowercase for easier matching
+  const promptLower = userPrompt.toLowerCase().trim();
+  
+  // Generate response based on content
+  let response = generateContextualResponse(promptLower);
+  
+  return {
+    content: response,
+    success: true
+  };
 }
 
-interface EmergencyResponse {
-  response: string;
-}
-
-interface ModelsResponse {
-  models: string[];
-}
-
-// The 4o mini key is now configured in GptApi.ts
-
-const ChatService = {
-  sendMessage: async (messages: ChatMessage[]): Promise<ChatResponse> => {
-    try {
-      const lastUserMessage = [...messages].reverse().find(msg => msg.role === 'user');
-      
-      if (!lastUserMessage) {
-        throw new Error('No user message found');
-      }
-      
-      console.log('Processing message:', lastUserMessage.content);
-      
-      // Get response from our offline API implementation
-      const gptResult = await getGptResponse(lastUserMessage.content);
-      
-      // Since our offline implementation always returns success=true,
-      // this condition will always be true
-      if (gptResult.success) {
-        console.log('Generated offline response successfully');
-        
+/**
+ * Generate emergency guidance locally
+ */
+export async function getEmergencyGuidance(situation: string): Promise<GptResponse> {
+  console.log('Generating emergency guidance locally:', situation);
+  
+  // Generate specialized emergency response
+  const response = generateEmergencyResponse(situation);
+  
         return {
-          response: gptResult.content,
-          messages: [
-            ...messages, 
-            { 
-              role: 'assistant', 
-              content: gptResult.content, 
-              timestamp: new Date() 
-            }
-          ]
+    content: response,
+          success: true
         };
       }
-      
-      // This code will never run with our offline implementation
-      // but we'll keep it as a safety measure
-      console.log('Offline API failed, using local fallback');
-      
-      const fallbackResponse = generateLocalResponse(lastUserMessage.content);
-      
-      return {
-        response: fallbackResponse,
-        messages: [
-          ...messages, 
-          { 
-            role: 'assistant', 
-            content: fallbackResponse, 
-            timestamp: new Date() 
-          }
-        ]
-      };
-    } catch (error) {
-      console.error('Error in chat:', error);
-      
-      // Return a fallback response on error
-      return {
-        response: 'Sorry, I encountered an error processing your request. Please try again later.',
-        messages: [
-          ...messages,
-          {
-            role: 'assistant',
-            content: 'Sorry, I encountered an error processing your request. Please try again later.',
-            timestamp: new Date()
-          }
-        ]
-      };
-    }
-  },
-  
-  getEmergencyHelp: async (situation: string): Promise<{response: string}> => {
-    try {
-      // Get emergency guidance from offline implementation
-      const emergencyResult = await getEmergencyGuidance(situation);
-      
-      // This will always be true with our offline implementation
-      if (emergencyResult.success) {
-        return { response: emergencyResult.content };
-      }
-      
-      // Fallback response if something goes wrong
-      return { response: generateLocalEmergencyResponse(situation) };
-    } catch (error) {
-      console.error('Error in emergency help:', error);
-      return { response: generateLocalEmergencyResponse(situation) };
-    }
-  },
-  
-  getModels: async (): Promise<string[]> => {
-    // Return dummy model name
-    return ['offline-model'];
-  }
-};
 
-// Local fallback response generator (only used if APIs fail)
-function generateLocalResponse(prompt: string): string {
-  prompt = prompt.toLowerCase().trim();
-  
+/**
+ * Generate contextual response based on the user's prompt
+ */
+function generateContextualResponse(prompt: string): string {
   // Handle greetings
   if (prompt.match(/^(hi|hello|hey|greetings).*/i)) {
     return "Hello! I'm Aksha's AI safety assistant. I'm here to help you with any safety concerns or questions about using the app. How can I assist you today?";
@@ -158,29 +87,49 @@ function generateLocalResponse(prompt: string): string {
   }
   
   // Handle other common questions
-  if (prompt.includes('what') && prompt.includes('do')) {
-    return "Aksha is a comprehensive personal safety app designed to help in various situations. I can guide you on using features like SOS alerts, journey tracking, safe area mapping, and emergency contact management. What specific aspect of personal safety are you interested in learning more about?";
+  if (prompt.includes('what can you do') || prompt.includes('how can you help')) {
+    return "I'm designed to provide personal safety guidance, answer questions about the Aksha app features, and offer emergency assistance information. I can help with safety tips for various situations, explain how to use the app's features like SOS alerts and journey tracking, and provide guidance during emergencies.";
   }
   
   if (prompt.includes('thank')) {
     return "You're very welcome! Your safety matters, and I'm here to help anytime you need assistance or information. Is there anything else I can help you with regarding the Aksha app or personal safety?";
   }
   
+  // For presentation demo
+  if (prompt.includes('demo') || prompt.includes('presentation')) {
+    return "This is a demonstration of the Aksha AI assistant. For this presentation, I'm running in offline mode without connecting to external APIs. I can answer questions about personal safety, emergency situations, and using the app's features. Feel free to ask me anything about personal safety!";
+  }
+  
   // Default response that feels personalized
   return `I understand you're asking about "${prompt}". As your safety assistant, I'm here to provide guidance on personal safety and using the Aksha app effectively. Could you provide more details about your question so I can give you the most helpful information?`;
 }
 
-// Local emergency response generator
-function generateLocalEmergencyResponse(situation: string): string {
-  if (situation.toLowerCase().includes('follow')) {
+/**
+ * Generate emergency response based on the situation
+ */
+function generateEmergencyResponse(situation: string): string {
+  const situationLower = situation.toLowerCase();
+  
+  if (situationLower.includes('follow')) {
     return "If someone is following you:\n\n1. Stay calm and move to a crowded, well-lit area\n2. Enter a public place like a store or restaurant\n3. Call a trusted contact using Aksha's quick-dial feature\n4. Use the SOS button to alert your emergency contacts\n5. If the threat is immediate, call 911\n\nYour location is being shared with your emergency contacts.";
-  } else if (situation.toLowerCase().includes('assault')) {
+  } 
+  
+  if (situationLower.includes('assault')) {
     return "If you're facing potential assault:\n\n1. Use Aksha's SOS button immediately\n2. Create distance between yourself and the threat if possible\n3. Make noise to attract attention\n4. Call 911 or have someone call for you\n5. Your emergency contacts have been alerted with your location";
-  } else if (situation.toLowerCase().includes('lost') || situation.toLowerCase().includes('unfamiliar')) {
+  } 
+  
+  if (situationLower.includes('lost') || situationLower.includes('unfamiliar')) {
     return "If you're lost or in an unfamiliar area:\n\n1. Stay in a well-lit, populated area\n2. Use Aksha's map feature to identify your location\n3. Contact a trusted person to help guide you\n4. Consider using a ride-sharing service through the app\n5. Your emergency contacts can see your location through Aksha";
-  } else {
-    return "Emergency guidance:\n\n1. Stay calm and assess your surroundings\n2. Move to a safe location if possible\n3. Use Aksha's SOS feature to alert your emergency contacts\n4. Call emergency services (911) if in immediate danger\n5. Share your exact location using the app's location sharing feature";
   }
+  
+  if (situationLower.includes('dark') || situationLower.includes('night')) {
+    return "For night safety:\n\n1. Stay in well-lit areas and avoid shortcuts through dark places\n2. Use Aksha's journey tracking to share your route with trusted contacts\n3. Keep your phone charged and easily accessible\n4. Consider carrying a personal alarm or whistle\n5. The SOS button is available for immediate help if needed";
+  }
+  
+  if (situationLower.includes('suspicious') || situationLower.includes('person')) {
+    return "If you encounter a suspicious person:\n\n1. Trust your instincts - if something feels wrong, act on it\n2. Move to a public area with other people around\n3. Enter a business or ask for help from someone in uniform\n4. Use Aksha's journey tracking to share your location\n5. If the situation escalates, use the SOS button to alert your contacts";
+  }
+  
+  // Default emergency guidance
+  return "Emergency guidance:\n\n1. Stay calm and assess your surroundings\n2. Move to a safe location if possible\n3. Use Aksha's SOS feature to alert your emergency contacts\n4. Call emergency services (911) if in immediate danger\n5. Share your exact location using the app's location sharing feature";
 }
-
-export default ChatService;

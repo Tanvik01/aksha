@@ -386,6 +386,7 @@ const styles = StyleSheet.create({
   },
   typingDots: {
     marginLeft: 5,
+
   },
   timestamp: {
     color: '#999',

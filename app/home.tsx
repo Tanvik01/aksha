@@ -18,9 +18,9 @@ import {
   NativeModules,
   SafeAreaView
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useRouter, usePathname } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
-import { Ionicons, MaterialIcons, FontAwesome5 } from '@expo/vector-icons';
+import { Ionicons, MaterialIcons, FontAwesome5, MaterialCommunityIcons } from '@expo/vector-icons';
 import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
 import * as Location from 'expo-location';
 import * as Contacts from 'expo-contacts';
@@ -29,6 +29,9 @@ import { useAppAuth } from '../context/AuthContext';
 import LocationService, { Location as LocationType } from '../services/LocationService';
 import apiClient from '../constants/Api';
 import QuickTipsContent from '../components/QuickTipsContent';
+import * as Battery from 'expo-battery';
+import FloatingChatbot from '../components/FloatingChatbot';
+import { useAuth } from '@clerk/clerk-expo';
 
 const { width } = Dimensions.get('window');
 
@@ -99,10 +102,10 @@ const SMS: SMSInterface = {
 
 export default function HomeScreen() {
   const router = useRouter();
-  const { signOut } = useAppAuth();
+  const pathname = usePathname();
+  const { signOut } = useAuth();
   const [location, setLocation] = useState(null);
   const [errorMsg, setErrorMsg] = useState(null);
-  const [activeTab, setActiveTab] = useState('Track Me');
   const [contacts, setContacts] = useState([]);
   const [selectedContacts, setSelectedContacts] = useState([]);
   const [isTracking, setIsTracking] = useState(false);
@@ -110,8 +113,11 @@ export default function HomeScreen() {
   const [searchQuery, setSearchQuery] = useState('');
   const [filteredContacts, setFilteredContacts] = useState([]);
   const mapRef = useRef(null);
-  const [batteryLevel, setBatteryLevel] = useState(85); // Default battery level
-  const [lowBatteryAlert, setLowBatteryAlert] = useState(true); // Battery alert setting
+  const [batteryLevel, setBatteryLevel] = useState(100);
+  const [isCharging, setIsCharging] = useState(false);
+  const [batteryAlertShown, setBatteryAlertShown] = useState(false);
+  const [lastKnownLocation, setLastKnownLocation] = useState(null);
+  const [hasShownContactsPrompt, setHasShownContactsPrompt] = useState(false);
 
   // Get initial location
   useEffect(() => {
@@ -147,11 +153,12 @@ export default function HomeScreen() {
           setContacts(contactsWithPhones);
           setFilteredContacts(contactsWithPhones);
           
-          // Check if we already have selected contacts
-          if (selectedContacts.length === 0) {
+          // Check if we already have selected contacts AND haven't shown the prompt yet
+          if (selectedContacts.length === 0 && !hasShownContactsPrompt) {
             // Show contact selection modal if no contacts are selected
             setTimeout(() => {
               setShowContactModal(true);
+              setHasShownContactsPrompt(true); // Mark that we've shown it
             }, 1000);
           }
         }
@@ -163,7 +170,7 @@ export default function HomeScreen() {
         );
       }
     })();
-  }, []);
+  }, [hasShownContactsPrompt]);
 
   // Filter contacts based on search query
   useEffect(() => {
@@ -282,6 +289,8 @@ export default function HomeScreen() {
           },
           (newLocation) => {
             setLocation(newLocation);
+            // Also store as last known location for emergency use
+            setLastKnownLocation(newLocation);
             
             // Animate map to new location
             if (mapRef.current) {
@@ -306,52 +315,86 @@ export default function HomeScreen() {
     };
   }, []);
 
-  // Get battery level (simulated)
-  const getBatteryLevel = async () => {
-    // In a real app, this would use a native API
-    // For now we'll simulate it with a random value between 30-100
-    const randomLevel = Math.floor(Math.random() * 70) + 30;
-    setBatteryLevel(randomLevel);
-    return randomLevel;
-  };
-
+  // Get battery level and set up listeners
   useEffect(() => {
-    // Get the battery level on mount
-    getBatteryLevel();
+    let batterySubscription = null;
 
-    // Simulate a battery update every 30 seconds
-    const batteryInterval = setInterval(() => {
-      getBatteryLevel();
-    }, 30000);
+    (async () => {
+      // Get initial battery level
+      const level = await Battery.getBatteryLevelAsync();
+      setBatteryLevel(Math.floor(level * 100));
+      
+      // Get initial charging status
+      const status = await Battery.getBatteryStateAsync();
+      setIsCharging(status === Battery.BatteryState.CHARGING || 
+                    status === Battery.BatteryState.FULL);
+      
+      // Set up battery level change listener
+      batterySubscription = Battery.addBatteryLevelListener(({ batteryLevel }) => {
+        const level = Math.floor(batteryLevel * 100);
+        setBatteryLevel(level);
+        
+        // Show alert if battery is below 30% and alert hasn't been shown yet
+        if (level <= 30 && !batteryAlertShown && !isCharging) {
+          Alert.alert(
+            "Low Battery",
+            "Your battery is running low. This may affect the app's ability to send emergency alerts. Please charge your device.",
+            [{ text: "OK", onPress: () => setBatteryAlertShown(true) }]
+          );
+        }
+        
+        // Reset alert shown state if battery goes above 30%
+        if (level > 30) {
+          setBatteryAlertShown(false);
+        }
+      });
+      
+      // Set up charging status change listener
+      Battery.addBatteryStateListener(({ batteryState }) => {
+        const charging = batteryState === Battery.BatteryState.CHARGING || 
+                         batteryState === Battery.BatteryState.FULL;
+        setIsCharging(charging);
+      });
+    })();
+    
+    // Clean up listeners when component unmounts
+    return () => {
+      if (batterySubscription) {
+        batterySubscription.remove();
+      }
+    };
+  }, [batteryAlertShown, isCharging]);
 
-    return () => clearInterval(batteryInterval);
-  }, []);
-
-  const renderTabs = () => {
-    const tabs = ['Track Me', 'Help line', 'Quick Tips'];
+  // Battery indicator component
+  const BatteryIndicator = () => {
+    // Determine color based on battery level
+    const getBatteryColor = () => {
+      if (isCharging) return '#4CAF50'; // Always green when charging
+      if (batteryLevel > 50) return '#4CAF50'; // Green
+      if (batteryLevel > 30) return '#FFA500'; // Orange
+      return '#E63946'; // Red
+    };
+    
     return (
-      <View style={styles.tabContainer}>
-        {tabs.map((tab) => (
-          <TouchableOpacity
-            key={tab}
+      <View style={styles.batteryContainer}>
+        <View style={styles.battery}>
+          <View 
             style={[
-              styles.tab,
-              activeTab === tab && styles.activeTab
-            ]}
-            onPress={() => setActiveTab(tab)}
-          >
-            <Text
-              style={[
-                styles.tabText,
-                activeTab === tab && styles.activeTabText
-              ]}
-            >
-              {tab}
-            </Text>
-          </TouchableOpacity>
-        ))}
+              styles.batteryLevel, 
+              { width: `${batteryLevel}%`, backgroundColor: getBatteryColor() }
+            ]} 
+          />
+        </View>
+        <Text style={styles.batteryText}>
+          {batteryLevel}% {isCharging ? '⚡' : ''}
+        </Text>
       </View>
     );
+  };
+
+  const renderTabs = () => {
+    // Return empty view - no more tabs at top
+    return null;
   };
 
   const getInitials = (name) => {
@@ -416,6 +459,7 @@ export default function HomeScreen() {
     }
     
     setShowContactModal(false);
+    setHasShownContactsPrompt(true); // Mark that the user has interacted with the prompt
   };
 
   const renderContactItem = ({ item }) => {
@@ -457,189 +501,397 @@ export default function HomeScreen() {
     );
   };
 
-  // Handle SOS button press
+  // Improved SOS handler with location fix and battery info
   const handleSOS = async () => {
     try {
-      // Vibrate phone with SOS pattern
+      // Immediately vibrate phone for user feedback
       Vibration.vibrate([500, 200, 500, 200, 500]);
       
-      // Get current location
-      let currentLocation: Location.LocationObject | null = null;
-      try {
-        currentLocation = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.BestForNavigation
-        });
-      } catch (error) {
-        console.error("Could not get location for SOS:", error);
-        Alert.alert("Location Error", "Could not determine your location. Please enable location services.");
-        return;
+      // Show immediate feedback to the user WITH a cancel button
+      Alert.alert(
+        "SOS Alert",
+        "Sending emergency messages...",
+        [
+          {
+            text: "Cancel",
+            onPress: () => console.log("SOS cancelled by user"),
+            style: "cancel"
+          }
+        ],
+        { cancelable: true } // Make alert cancellable
+      );
+      
+      // Use last known location if available, otherwise try to get current location
+      let currentLocation = lastKnownLocation;
+      
+      // If no cached location, try to get current location with a timeout
+      if (!currentLocation) {
+        try {
+          console.log("No cached location, getting current location");
+          // Set a short timeout for getting location to avoid long delays
+          const locationPromise = Location.getCurrentPositionAsync({
+            accuracy: Location.Accuracy.Balanced // Use balanced accuracy for speed
+          });
+          
+          // Set a timeout to ensure we don't wait too long
+          const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Location timeout')), 3000)
+          );
+          
+          // Race between getting location and timeout
+          currentLocation = await Promise.race([locationPromise, timeoutPromise]);
+        } catch (error) {
+          console.warn("Location acquisition failed:", error);
+          
+          // Last resort - try to get last known location from device
+          try {
+            console.log("Trying to get last known location from device");
+            currentLocation = await Location.getLastKnownPositionAsync();
+          } catch (lastLocationError) {
+            console.error("Failed to get last known location:", lastLocationError);
+          }
+        }
       }
       
-      // Skip backend API call and handle everything on device
+      // Prepare the message with battery info and location if available
+      let message = `EMERGENCY: I need help! Battery: ${batteryLevel}%${isCharging ? ' (Charging)' : ''}`;
+      
+      if (currentLocation && currentLocation.coords) {
+        // Format the coordinates to 6 decimal places for accuracy
+        const lat = currentLocation.coords.latitude.toFixed(6);
+        const lng = currentLocation.coords.longitude.toFixed(6);
+        message += `\n\nMy current location is: https://maps.google.com/?q=${lat},${lng}`;
+        
+        // Add additional information that might be helpful
+        if (currentLocation.coords.accuracy) {
+          message += `\nLocation accuracy: ~${Math.round(currentLocation.coords.accuracy)}m`;
+        }
+        
+        // Add timestamp of when location was acquired
+        const timestamp = currentLocation.timestamp
+          ? new Date(currentLocation.timestamp).toLocaleTimeString()
+          : new Date().toLocaleTimeString();
+        message += `\nTime: ${timestamp}`;
+      } else {
+        message += "\n\nLocation unavailable. Please call me for more information.";
+      }
+      
+      console.log("SOS message:", message);
       
       // Send SMS to emergency contacts directly from device
       if (selectedContacts.length > 0) {
-        const message = `EMERGENCY: I need help! My current location is: https://maps.google.com/?q=${currentLocation.coords.latitude},${currentLocation.coords.longitude}`;
-        
         // Extract phone numbers from contacts
-        const phoneNumbers: string[] = [];
+        const phoneNumbers = [];
         selectedContacts.forEach(contact => {
           if (contact.phoneNumbers && contact.phoneNumbers.length > 0) {
             phoneNumbers.push(contact.phoneNumbers[0].number);
           }
         });
         
-        try {
-          // Use our custom SMS module
-          const { result } = await SMS.sendSMSAsync(phoneNumbers, message);
-          console.log("SMS result:", result);
-        } catch (smsError) {
-          console.error("SMS error:", smsError);
+        if (phoneNumbers.length > 0) {
+          try {
+            // Use our custom SMS module with a shorter timeout
+            console.log("Sending SMS to:", phoneNumbers);
+            SMS.sendSMSAsync(phoneNumbers, message)
+              .then(({ result }) => {
+                console.log("SMS result:", result);
+                
+                // Show success message after SMS is sent
+                Alert.alert(
+                  "SOS Alert Sent",
+                  "Your emergency contacts have been notified." +
+                  (currentLocation && currentLocation.coords ? "" : " However, your location couldn't be included."),
+                  [{ text: "OK" }]
+                );
+              })
+              .catch(error => {
+                console.error("SMS sending error:", error);
+                Alert.alert(
+                  "SMS Sending Issue",
+                  "There was a problem sending SMS. Please try calling emergency services directly.",
+                  [{ text: "OK" }]
+                );
+              });
+          } catch (smsError) {
+            console.error("SMS error:", smsError);
+            Alert.alert(
+              "SMS Error",
+              "Could not send SMS. Please call emergency services directly.",
+              [{ text: "OK" }]
+            );
+          }
         }
       } else {
         Alert.alert(
           "No Emergency Contacts",
-          "You haven't selected any emergency contacts. Please add trusted contacts to use the SOS feature."
+          "You haven't selected any emergency contacts. Please add trusted contacts to use the SOS feature.",
+          [
+            { text: "Cancel", style: "cancel" },
+            { text: "Add Contacts", onPress: () => setShowContactModal(true) }
+          ]
         );
-        return;
       }
-      
-      // Show alert to user
-      Alert.alert(
-        "SOS Alert Sent",
-        "Your emergency contacts have been notified with your location."
-      );
     } catch (error) {
       console.error("SOS error:", error);
       Alert.alert(
         "SOS Error",
-        "There was an error sending your SOS alert. Please try calling emergency services directly."
+        "There was an error sending your SOS alert. Please try calling emergency services directly.",
+        [{ text: "OK" }]
       );
     }
   };
 
   // Handle logout
   const handleLogout = async () => {
-    Alert.alert(
-      "Log Out",
-      "Are you sure you want to log out?",
-      [
-        { text: "Cancel", style: "cancel" },
-        { 
-          text: "Log Out", 
-          style: "destructive",
-          onPress: async () => {
-            try {
-              // Stop location tracking if active
-              if (isTracking) {
-                await stopLocationTracking();
-              }
-              
-              // Sign out using Clerk
-              await signOut();
-              
-              // Navigate to login screen
-              router.replace('/auth/login');
-            } catch (error) {
-              console.error('Logout error:', error);
-              Alert.alert('Error', 'Failed to log out. Please try again.');
-            }
-          }
-        }
-      ]
+    try {
+      // Use Clerk's signOut function to properly log out
+      await signOut();
+      
+      // Navigate back to the login/welcome screen
+      router.replace('/');
+    } catch (error) {
+      console.error('Error signing out:', error);
+      // Show an error message if logout fails
+      Alert.alert(
+        'Logout Failed',
+        'There was a problem logging out. Please try again.'
+      );
+    }
+  };
+
+  const renderHelpLine = () => {
+    return (
+      <View style={styles.helpLineContent}>
+        <Text style={styles.helpLineHeader}>Emergency Helplines</Text>
+        <Text style={styles.helpLineSubheader}>Tap any card to call directly</Text>
+        
+        {/* Main Emergency Services */}
+        <TouchableOpacity
+          style={styles.emergencyCard}
+          onPress={() => Linking.openURL('tel:112')}
+          activeOpacity={0.8}
+        >
+          <LinearGradient
+            colors={['#E63946', '#F87171']}
+            style={styles.emergencyCardGradient}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 0 }}
+          >
+            <View style={styles.emergencyCardContent}>
+              <View style={styles.emergencyCardIconContainer}>
+                <Ionicons name="call" size={28} color="#FFF" />
+              </View>
+              <View style={styles.emergencyCardText}>
+                <Text style={styles.emergencyCardTitle}>Emergency Services</Text>
+                <Text style={styles.emergencyCardNumber}>112</Text>
+                <Text style={styles.emergencyCardDescription}>
+                  National Emergency Number
+                </Text>
+              </View>
+              <View style={styles.callNowButton}>
+                <Text style={styles.callNowText}>CALL NOW</Text>
+              </View>
+            </View>
+          </LinearGradient>
+        </TouchableOpacity>
+        
+        {/* Women's Helpline */}
+        <TouchableOpacity
+          style={styles.helplineCard}
+          onPress={() => Linking.openURL('tel:1091')}
+          activeOpacity={0.8}
+        >
+          <View style={styles.helplineCardContent}>
+            <View style={[styles.helplineCardIcon, { backgroundColor: '#FF6B9C' }]}>
+              <MaterialCommunityIcons name="shield-account" size={24} color="#FFF" />
+            </View>
+            <View style={styles.helplineCardText}>
+              <Text style={styles.helplineCardTitle}>Women's Helpline</Text>
+              <Text style={styles.helplineCardNumber}>1091</Text>
+              <Text style={styles.helplineCardDescription}>National Women Commission Helpline</Text>
+            </View>
+            <Ionicons name="call-outline" size={24} color="#FF6B9C" />
+          </View>
+        </TouchableOpacity>
+        
+        {/* Domestic Violence */}
+        <TouchableOpacity
+          style={styles.helplineCard}
+          onPress={() => Linking.openURL('tel:181')}
+          activeOpacity={0.8}
+        >
+          <View style={styles.helplineCardContent}>
+            <View style={[styles.helplineCardIcon, { backgroundColor: '#7209B7' }]}>
+              <MaterialIcons name="home" size={24} color="#FFF" />
+            </View>
+            <View style={styles.helplineCardText}>
+              <Text style={styles.helplineCardTitle}>Domestic Violence</Text>
+              <Text style={styles.helplineCardNumber}>181</Text>
+              <Text style={styles.helplineCardDescription}>Women's Helpline Against Violence</Text>
+            </View>
+            <Ionicons name="call-outline" size={24} color="#7209B7" />
+          </View>
+        </TouchableOpacity>
+        
+        {/* Child Helpline */}
+        <TouchableOpacity
+          style={styles.helplineCard}
+          onPress={() => Linking.openURL('tel:1098')}
+          activeOpacity={0.8}
+        >
+          <View style={styles.helplineCardContent}>
+            <View style={[styles.helplineCardIcon, { backgroundColor: '#4361EE' }]}>
+              <MaterialCommunityIcons name="human-child" size={24} color="#FFF" />
+            </View>
+            <View style={styles.helplineCardText}>
+              <Text style={styles.helplineCardTitle}>Child Helpline</Text>
+              <Text style={styles.helplineCardNumber}>1098</Text>
+              <Text style={styles.helplineCardDescription}>Emergency services for children in distress</Text>
+            </View>
+            <Ionicons name="call-outline" size={24} color="#4361EE" />
+          </View>
+        </TouchableOpacity>
+        
+        {/* Medical Emergency */}
+        <TouchableOpacity
+          style={styles.helplineCard}
+          onPress={() => Linking.openURL('tel:108')}
+          activeOpacity={0.8}
+        >
+          <View style={styles.helplineCardContent}>
+            <View style={[styles.helplineCardIcon, { backgroundColor: '#057A55' }]}>
+              <MaterialCommunityIcons name="ambulance" size={24} color="#FFF" />
+            </View>
+            <View style={styles.helplineCardText}>
+              <Text style={styles.helplineCardTitle}>Medical Emergency</Text>
+              <Text style={styles.helplineCardNumber}>108</Text>
+              <Text style={styles.helplineCardDescription}>Ambulance & Disaster Management</Text>
+            </View>
+            <Ionicons name="call-outline" size={24} color="#057A55" />
+          </View>
+        </TouchableOpacity>
+        
+        {/* Police */}
+        <TouchableOpacity
+          style={styles.helplineCard}
+          onPress={() => Linking.openURL('tel:100')}
+          activeOpacity={0.8}
+        >
+          <View style={styles.helplineCardContent}>
+            <View style={[styles.helplineCardIcon, { backgroundColor: '#1E40AF' }]}>
+              <MaterialCommunityIcons name="police-badge" size={24} color="#FFF" />
+            </View>
+            <View style={styles.helplineCardText}>
+              <Text style={styles.helplineCardTitle}>Police</Text>
+              <Text style={styles.helplineCardNumber}>100</Text>
+              <Text style={styles.helplineCardDescription}>Emergency police services</Text>
+            </View>
+            <Ionicons name="call-outline" size={24} color="#1E40AF" />
+          </View>
+        </TouchableOpacity>
+      </View>
     );
+  };
+
+  // Add a function to focus on the user's location
+  const focusUserLocation = () => {
+    if (mapRef.current && location) {
+      // Use the map reference to animate to the user's current position
+      mapRef.current.animateToRegion({
+        latitude: location.coords.latitude,
+        longitude: location.coords.longitude,
+        latitudeDelta: 0.005, // Zoom level - smaller means more zoomed in
+        longitudeDelta: 0.005,
+      }, 1000); // Animation duration in ms
+    } else {
+      console.log("Map reference or location not available");
+      // If location isn't available yet, try to get it
+      if (!location) {
+        (async () => {
+          try {
+            let currentLocation = await Location.getCurrentPositionAsync({
+              accuracy: Location.Accuracy.BestForNavigation
+            });
+            setLocation(currentLocation);
+            
+            // Try again after setting location
+            if (mapRef.current && currentLocation) {
+              mapRef.current.animateToRegion({
+                latitude: currentLocation.coords.latitude,
+                longitude: currentLocation.coords.longitude,
+                latitudeDelta: 0.005,
+                longitudeDelta: 0.005,
+              }, 1000);
+            }
+          } catch (error) {
+            console.error("Failed to get location:", error);
+            Alert.alert(
+              "Location Error",
+              "Could not get your current location. Please make sure location services are enabled."
+            );
+          }
+        })();
+      }
+    }
   };
 
   // Render tab content based on active tab
   const renderTabContent = () => {
-    switch (activeTab) {
-      case 'Track Me':
-        return (
-          <View style={styles.trackMeContent}>
-            <View style={styles.batteryContainer}>
-              <View style={styles.battery}>
-                <View 
-                  style={[
-                    styles.batteryLevel, 
-                    batteryLevel < 20 ? styles.batteryLow : null,
-                    { width: `${batteryLevel}%` }
-                  ]} 
-                />
-              </View>
-              <Text style={styles.batteryText}>
-                {batteryLevel}% {batteryLevel < 20 ? '(Low)' : ''}
-              </Text>
-            </View>
-            
-            <View style={styles.alertSettings}>
-              <Text style={styles.alertTitle}>Alert Settings</Text>
-              
-              <View style={styles.alertOption}>
-                <Text style={styles.alertOptionText}>Low Battery Alert</Text>
-                <TouchableOpacity 
-                  style={styles.switchContainer}
-                  onPress={() => setLowBatteryAlert(!lowBatteryAlert)}
-                >
-                  <View style={[
-                    styles.switchOption, 
-                    lowBatteryAlert ? styles.switchActive : styles.switchInactive
-                  ]}>
-                    <Text style={[
-                      styles.switchText,
-                      lowBatteryAlert ? styles.switchActiveText : styles.switchInactiveText
-                    ]}>
-                      {lowBatteryAlert ? 'ON' : 'OFF'}
-                    </Text>
-                  </View>
-                </TouchableOpacity>
-              </View>
-            </View>
-          </View>
-        );
-      case 'Help line':
-        return (
-          <View style={styles.helpLineContent}>
-            <LinearGradient
-              colors={['#E63946', '#F87171']}
-              style={styles.emergencyCard}
+    return (
+      <View style={styles.trackMeContent}>
+        <BatteryIndicator />
+        
+        {/* Map View */}
+        <View style={styles.mapContainer}>
+          {location ? (
+            <MapView
+              ref={mapRef}
+              style={styles.map}
+              initialRegion={{
+                latitude: location.coords.latitude,
+                longitude: location.coords.longitude,
+                latitudeDelta: 0.01,
+                longitudeDelta: 0.01,
+              }}
+              provider={PROVIDER_GOOGLE}
+              showsUserLocation={true}
+              showsMyLocationButton={false}
+              customMapStyle={darkMapStyle}
             >
-              <View style={styles.emergencyCardContent}>
-                <View style={styles.emergencyCardText}>
-                  <Text style={styles.emergencyCardTitle}>Emergency Contact</Text>
-                  <Text style={styles.emergencyCardDescription}>
-                    Tap to call the emergency helpline
-                  </Text>
-                </View>
-                <TouchableOpacity
-                  onPress={() => Linking.openURL('tel:911')}
-                >
-                  <Ionicons name="call" size={28} color="#FFF" />
-                </TouchableOpacity>
-              </View>
-            </LinearGradient>
-            
-            <View style={styles.helplineCard}>
-              <View style={styles.helplineCardContent}>
-                <View style={styles.helplineCardText}>
-                  <Text style={styles.helplineCardTitle}>Women's Helpline</Text>
-                  <Text style={styles.helplineCardNumber}>1800-123-4567</Text>
-                </View>
-                <TouchableOpacity
-                  onPress={() => Linking.openURL('tel:18001234567')}
-                >
-                  <Ionicons name="call" size={24} color="#E63946" />
-                </TouchableOpacity>
-              </View>
+              <Marker
+                coordinate={{
+                  latitude: location.coords.latitude,
+                  longitude: location.coords.longitude,
+                }}
+                title="Your Location"
+              />
+            </MapView>
+          ) : (
+            <View style={styles.loadingMap}>
+              <Text style={styles.loadingText}>Loading map...</Text>
             </View>
-          </View>
-        );
-      case 'Quick Tips':
-        return (
-          <QuickTipsContent />
-        );
-      default:
-        return null;
-    }
+          )}
+          
+          {/* Custom Track Me button */}
+          <TouchableOpacity 
+            style={styles.trackMeButton}
+            onPress={focusUserLocation}
+          >
+            <View style={styles.trackMeButtonInner}>
+              <Ionicons name="locate" size={24} color="#FF6B9C" />
+            </View>
+          </TouchableOpacity>
+        </View>
+        
+        {/* Additional content */}
+        <View style={styles.infoContainer}>
+          <Text style={styles.infoTitle}>Location Tracking</Text>
+          <Text style={styles.infoDescription}>
+            Your location is being tracked and can be shared in case of emergency.
+          </Text>
+        </View>
+      </View>
+    );
   };
 
   return (
@@ -654,226 +906,265 @@ export default function HomeScreen() {
         <View style={styles.header}>
           <Text style={styles.headerTitle}>Aksha</Text>
           <TouchableOpacity 
-            style={styles.logoutHeaderButton}
+            style={styles.logoutButton}
             onPress={handleLogout}
-            activeOpacity={0.7}
           >
-            <Ionicons name="log-out-outline" size={24} color="#FF6B9C" />
+            <Ionicons name="log-out-outline" size={24} color="#999" />
           </TouchableOpacity>
         </View>
         
-        {renderTabs()}
-
-        <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
-          <Text style={styles.description}>
-            Share live location with your friends
-          </Text>
-
-          {renderTabContent()}
+        <ScrollView style={styles.content}>
+          {/* Remove the tab container/renderTabs call */}
           
-          {activeTab !== 'Quick Tips' && (
-            <>
-              <View style={styles.friendsSection}>
-                <View style={styles.sectionHeader}>
-                  <Text style={styles.sectionTitle}>Your Friend's Live Location</Text>
-                  <TouchableOpacity 
-                    style={styles.addFriendButton}
-                    onPress={() => setShowContactModal(true)}
-                  >
-                    <Ionicons name="add-circle" size={24} color="#FF6B9C" />
-                  </TouchableOpacity>
-                </View>
-                
-                <ScrollView 
-                  horizontal 
-                  showsHorizontalScrollIndicator={false}
-                  style={styles.friendsScrollView}
+          {/* Directly render the map content without tabs */}
+          <View style={styles.trackMeContent}>
+            <BatteryIndicator />
+            
+            {/* Map View */}
+            <View style={styles.mapContainer}>
+              {location ? (
+                <MapView
+                  ref={mapRef}
+                  style={styles.map}
+                  initialRegion={{
+                    latitude: location.coords.latitude,
+                    longitude: location.coords.longitude,
+                    latitudeDelta: 0.01,
+                    longitudeDelta: 0.01,
+                  }}
+                  provider={PROVIDER_GOOGLE}
+                  showsUserLocation={true}
+                  showsMyLocationButton={false}
+                  customMapStyle={darkMapStyle}
                 >
-                  {selectedContacts.length > 0 ? (
-                    selectedContacts.map((contact, index) => (
-                      <TouchableOpacity key={index} style={styles.friendItem}>
-                        <View 
-                          style={[
-                            styles.friendIcon, 
-                            { backgroundColor: getColorFromName(contact.name) }
-                          ]}
-                        >
-                          <Text style={styles.friendInitial}>
-                            {getInitials(contact.name)}
-                          </Text>
-                        </View>
-                        <Text style={styles.friendName} numberOfLines={1}>
-                          {contact.name}
-                        </Text>
-                      </TouchableOpacity>
-                    ))
-                  ) : (
-                    <View style={styles.noContactsContainer}>
-                      <Text style={styles.noContactsText}>
-                        No contacts selected. Tap the + button to add trusted contacts.
-                      </Text>
-                    </View>
-                  )}
-                </ScrollView>
-              </View>
-
-              <View style={styles.mapContainer}>
-                {location ? (
-                  <MapView
-                    ref={mapRef}
-                    provider={PROVIDER_GOOGLE}
-                    style={styles.map}
-                    initialRegion={{
+                  <Marker
+                    coordinate={{
                       latitude: location.coords.latitude,
                       longitude: location.coords.longitude,
-                      latitudeDelta: 0.005,
-                      longitudeDelta: 0.005,
                     }}
-                    customMapStyle={darkMapStyle}
-                  >
-                    <Marker
-                      coordinate={{
-                        latitude: location.coords.latitude,
-                        longitude: location.coords.longitude,
-                      }}
-                      title="You're here"
-                    >
-                      <View style={styles.markerContainer}>
-                        <View style={styles.markerDot} />
-                        <View style={styles.markerRing} />
-                      </View>
-                    </Marker>
-                  </MapView>
-                ) : (
-                  <View style={styles.loadingMap}>
-                    <Text style={styles.loadingText}>
-                      {errorMsg || "Loading map..."}
-                    </Text>
-                  </View>
-                )}
-
-                <View style={styles.locationLabel}>
-                  <Text style={styles.locationLabelText}>You're here</Text>
+                    title="Your Location"
+                  />
+                </MapView>
+              ) : (
+                <View style={styles.loadingMap}>
+                  <Text style={styles.loadingText}>Loading map...</Text>
                 </View>
-
-                <TouchableOpacity style={styles.trackButton} onPress={toggleLocationTracking}>
-                  <LinearGradient
-                    colors={isTracking ? ['#4CAF50', '#2E7D32'] : ['#FF6B9C', '#F24976']}
-                    start={{ x: 0, y: 0 }}
-                    end={{ x: 1, y: 0 }}
-                    style={styles.trackButtonGradient}
-                  >
-                    <Ionicons 
-                      name={isTracking ? "location" : "location-outline"} 
-                      size={20} 
-                      color="white" 
-                      style={styles.trackButtonIcon} 
-                    />
-                    <Text style={styles.trackButtonText}>
-                      {isTracking ? "Stop Tracking" : "Track me"}
-                    </Text>
-                  </LinearGradient>
-                </TouchableOpacity>
-              </View>
-            </>
-          )}
-        </ScrollView>
-
-        <View style={styles.bottomNav}>
-          <TouchableOpacity style={styles.navItem}>
-            <Ionicons name="home" size={24} color="#FF6B9C" />
-            <Text style={[styles.navText, styles.activeNavText]}>Home</Text>
-          </TouchableOpacity>
-          
-          <TouchableOpacity style={styles.navItem}>
-            <Ionicons name="people-outline" size={24} color="#999" />
-            <Text style={styles.navText}>Social</Text>
-          </TouchableOpacity>
-          
-          <TouchableOpacity style={styles.sosButton} onPress={handleSOS}>
-            <LinearGradient
-              colors={['#FF6B9C', '#F24976']}
-              style={styles.sosButtonGradient}
-            >
-              <Ionicons name="alert" size={32} color="white" />
-            </LinearGradient>
-            <Text style={styles.sosText}>SOS</Text>
-          </TouchableOpacity>
-          
-          <TouchableOpacity style={styles.navItem}>
-            <Ionicons name="shield-checkmark-outline" size={24} color="#999" />
-            <Text style={styles.navText}>Safety</Text>
-          </TouchableOpacity>
-          
-          <TouchableOpacity style={styles.navItem}>
-            <Ionicons name="location-outline" size={24} color="#999" />
-            <Text style={styles.navText}>Marker</Text>
-          </TouchableOpacity>
-        </View>
-
-        <Modal
-          visible={showContactModal}
-          animationType="slide"
-          transparent={true}
-          onRequestClose={() => setShowContactModal(false)}
-        >
-          <View style={styles.modalContainer}>
-            <View style={styles.modalContent}>
-              <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>Select Trusted Contacts</Text>
-                <Text style={styles.modalSubtitle}>Choose at least one contact who will receive your location updates</Text>
-              </View>
-
-              <View style={styles.searchContainer}>
-                <Ionicons name="search" size={20} color="#999" style={styles.searchIcon} />
-                <TextInput
-                  style={styles.searchInput}
-                  placeholder="Search contacts..."
-                  placeholderTextColor="#999"
-                  value={searchQuery}
-                  onChangeText={setSearchQuery}
-                />
-                {searchQuery.length > 0 && (
-                  <TouchableOpacity onPress={() => setSearchQuery('')}>
-                    <Ionicons name="close-circle" size={20} color="#999" />
-                  </TouchableOpacity>
-                )}
-              </View>
-
-              <View style={styles.selectedCount}>
-                <Text style={styles.selectedCountText}>
-                  {selectedContacts.length} contact{selectedContacts.length !== 1 ? 's' : ''} selected (minimum 1)
-                </Text>
-              </View>
-
-              <FlatList
-                data={filteredContacts}
-                renderItem={renderContactItem}
-                keyExtractor={(item, index) => item.id || index.toString()}
-                style={styles.contactsList}
-                contentContainerStyle={styles.contactsListContent}
-                showsVerticalScrollIndicator={false}
-              />
-
-              <View style={styles.modalButtons}>
-                <TouchableOpacity 
-                  style={styles.cancelButton}
-                  onPress={() => setShowContactModal(false)}
-                >
-                  <Text style={styles.cancelButtonText}>Cancel</Text>
-                </TouchableOpacity>
-                
-                <TouchableOpacity 
-                  style={styles.saveButton}
-                  onPress={saveContacts}
-                >
-                  <Text style={styles.saveButtonText}>Save</Text>
-                </TouchableOpacity>
-              </View>
+              )}
+              
+              {/* Custom Track Me button */}
+              <TouchableOpacity 
+                style={styles.trackMeButton}
+                onPress={focusUserLocation}
+              >
+                <View style={styles.trackMeButtonInner}>
+                  <Ionicons name="locate" size={24} color="#FF6B9C" />
+                </View>
+              </TouchableOpacity>
+            </View>
+            
+            {/* Additional content */}
+            <View style={styles.infoContainer}>
+              <Text style={styles.infoTitle}>Location Tracking</Text>
+              <Text style={styles.infoDescription}>
+                Your location is being tracked and can be shared in case of emergency.
+              </Text>
             </View>
           </View>
-        </Modal>
+          
+          {/* Add Emergency Contacts Button */}
+          <TouchableOpacity
+            style={styles.emergencyContactsButton}
+            onPress={() => setShowContactModal(true)}
+          >
+            <LinearGradient
+              colors={['#FF6B9C', '#F24976']}
+              style={styles.emergencyContactsGradient}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 0 }}
+            >
+              <View style={styles.emergencyContactsContent}>
+                <View style={styles.emergencyContactsIcon}>
+                  <Ionicons name="person-add" size={24} color="#fff" />
+                </View>
+                <View style={styles.emergencyContactsText}>
+                  <Text style={styles.emergencyContactsTitle}>
+                    {selectedContacts.length > 0 
+                      ? `${selectedContacts.length} Emergency Contact${selectedContacts.length > 1 ? 's' : ''}` 
+                      : 'Add Emergency Contacts'}
+                  </Text>
+                  <Text style={styles.emergencyContactsDescription}>
+                    {selectedContacts.length > 0 
+                      ? 'Tap to manage your contacts' 
+                      : 'Add trusted contacts for emergencies'}
+                  </Text>
+                </View>
+                <Ionicons name="chevron-forward" size={24} color="#fff" />
+              </View>
+            </LinearGradient>
+          </TouchableOpacity>
+          
+          {/* Add any additional content here */}
+        </ScrollView>
+        
+        {/* Bottom navigation stays the same */}
+        <View style={styles.bottomNav}>
+          <TouchableOpacity 
+            style={styles.navItem}
+            onPress={() => router.replace('/home')}
+          >
+            <Ionicons 
+              name="home-outline" 
+              size={24} 
+              color={pathname === '/home' ? '#FF6B9C' : '#999'} 
+            />
+            <Text style={[styles.navText, pathname === '/home' && styles.activeNavText]}>Home</Text>
+          </TouchableOpacity>
+          
+          <TouchableOpacity 
+            style={styles.navItem}
+            onPress={() => router.push('/social')}
+          >
+            <Ionicons 
+              name="people-outline" 
+              size={24} 
+              color={pathname === '/social' ? '#FF6B9C' : '#999'} 
+            />
+            <Text style={[styles.navText, pathname === '/social' && styles.activeNavText]}>Social</Text>
+          </TouchableOpacity>
+          
+          <View style={styles.sosButton}>
+            <TouchableOpacity 
+              onPress={handleSOS}
+              activeOpacity={0.8}
+            >
+              <LinearGradient
+                colors={['#FF6B9C', '#F24976']}
+                style={styles.sosButtonGradient}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+              >
+                <Ionicons name="alert" size={32} color="#fff" />
+              </LinearGradient>
+            </TouchableOpacity>
+            <Text style={styles.sosText}>SOS</Text>
+          </View>
+          
+          <TouchableOpacity 
+            style={styles.navItem}
+            onPress={() => router.push('/helpline')}
+          >
+            <Ionicons 
+              name="call-outline" 
+              size={24} 
+              color={pathname === '/helpline' ? '#FF6B9C' : '#999'} 
+            />
+            <Text style={[styles.navText, pathname === '/helpline' && styles.activeNavText]}>Helpline</Text>
+          </TouchableOpacity>
+          
+          <TouchableOpacity 
+            style={styles.navItem}
+            onPress={() => router.push('/quicktips')}
+          >
+            <Ionicons 
+              name="information-circle-outline" 
+              size={24} 
+              color={pathname === '/quicktips' ? '#FF6B9C' : '#999'} 
+            />
+            <Text style={[styles.navText, pathname === '/quicktips' && styles.activeNavText]}>Tips</Text>
+          </TouchableOpacity>
+        </View>
+        
+        {/* Add the floating chatbot */}
+        <FloatingChatbot />
       </View>
+      
+      {/* Contact Selection Modal */}
+      <Modal
+        visible={showContactModal}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={() => setShowContactModal(false)}
+      >
+        <View style={styles.modalContainer}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Emergency Contacts</Text>
+              <TouchableOpacity onPress={() => setShowContactModal(false)}>
+                <Ionicons name="close" size={24} color="#FF6B9C" />
+              </TouchableOpacity>
+            </View>
+            
+            <View style={styles.selectedContactsContainer}>
+              <Text style={styles.selectedContactsTitle}>
+                {selectedContacts.length > 0 
+                  ? `Selected Contacts (${selectedContacts.length}/5)` 
+                  : 'No contacts selected'}
+              </Text>
+              <View style={styles.selectedContactsRow}>
+                {selectedContacts.length > 0 ? (
+                  selectedContacts.map((contact) => (
+                    <View key={contact.id} style={styles.selectedContactChip}>
+                      <Text style={styles.selectedContactName}>
+                        {contact.name.length > 10 
+                          ? contact.name.substring(0, 10) + '...' 
+                          : contact.name}
+                      </Text>
+                      <TouchableOpacity 
+                        style={styles.removeContactButton}
+                        onPress={() => toggleContactSelection(contact)}
+                      >
+                        <Ionicons name="close-circle" size={20} color="#fff" />
+                      </TouchableOpacity>
+                    </View>
+                  ))
+                ) : (
+                  <Text style={styles.noContactsText}>
+                    Select up to 5 trusted contacts to alert in emergencies
+                  </Text>
+                )}
+              </View>
+            </View>
+            
+            <View style={styles.searchBarContainer}>
+              <Ionicons name="search" size={20} color="#999" />
+              <TextInput
+                style={styles.searchInput}
+                placeholder="Search contacts..."
+                placeholderTextColor="#999"
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+              />
+              {searchQuery ? (
+                <TouchableOpacity onPress={() => setSearchQuery('')}>
+                  <Ionicons name="close-circle" size={20} color="#999" />
+                </TouchableOpacity>
+              ) : null}
+            </View>
+            
+            <FlatList
+              data={filteredContacts}
+              renderItem={renderContactItem}
+              keyExtractor={(item) => item.id}
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={styles.contactsList}
+            />
+            
+            <TouchableOpacity 
+              style={styles.saveButton}
+              onPress={saveContacts}
+            >
+              <LinearGradient
+                colors={['#FF6B9C', '#F24976']}
+                style={styles.saveButtonGradient}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 0 }}
+              >
+                <Text style={styles.saveButtonText}>Save Contacts</Text>
+              </LinearGradient>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -926,6 +1217,14 @@ const darkMapStyle = [
     "stylers": [
       {
         "color": "#9e9e9e"
+      }
+    ]
+  },
+  {
+    "featureType": "administrative.land_parcel",
+    "stylers": [
+      {
+        "visibility": "off"
       }
     ]
   },
@@ -1065,6 +1364,7 @@ const styles = StyleSheet.create({
   },
   container: {
     flex: 1,
+    backgroundColor: '#121212',
   },
   header: {
     flexDirection: 'row',
@@ -1075,6 +1375,7 @@ const styles = StyleSheet.create({
     paddingBottom: 15,
     borderBottomWidth: 1,
     borderBottomColor: '#333',
+    backgroundColor: '#1A1A1A',
   },
   headerTitle: {
     fontSize: 24,
@@ -1082,181 +1383,83 @@ const styles = StyleSheet.create({
     color: '#FF6B9C',
     fontFamily: 'System',
   },
-  logoutHeaderButton: {
+  logoutButton: {
     padding: 8,
     borderRadius: 20,
   },
-  tabContainer: {
-    flexDirection: 'row',
-    paddingHorizontal: 20,
-    borderBottomWidth: 1,
-    borderBottomColor: '#333',
-  },
-  tab: {
-    paddingVertical: 15,
-    marginRight: 25,
-  },
-  activeTab: {
-    borderBottomWidth: 3,
-    borderBottomColor: '#FF6B9C',
-  },
-  tabText: {
-    color: '#999',
-    fontSize: 16,
-    fontFamily: 'System',
-  },
-  activeTabText: {
-    color: '#FF6B9C',
-    fontWeight: '600',
-  },
   content: {
     flex: 1,
-    paddingHorizontal: 20,
-    paddingTop: 20,
-  },
-  description: {
-    color: '#ccc',
-    fontSize: 16,
-    marginBottom: 25,
-    fontFamily: 'System',
-    lineHeight: 22,
-  },
-  friendsSection: {
-    marginBottom: 30,
-  },
-  sectionHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 15,
-  },
-  sectionTitle: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '600',
-    fontFamily: 'System',
-  },
-  addFriendButton: {
-    padding: 5,
-  },
-  friendsScrollView: {
-    flexDirection: 'row',
-  },
-  friendItem: {
-    alignItems: 'center',
-    marginRight: 20,
-    width: 70,
-  },
-  friendIcon: {
-    width: 70,
-    height: 70,
-    borderRadius: 35,
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 10,
-    elevation: 3,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 3,
-  },
-  friendInitial: {
-    color: 'white',
-    fontSize: 28,
-    fontWeight: 'bold',
-    fontFamily: 'System',
-  },
-  friendName: {
-    color: '#ccc',
-    fontSize: 12,
-    textAlign: 'center',
-    fontFamily: 'System',
-  },
-  noContactsContainer: {
-    width: width - 40,
     padding: 20,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#1E1E1E',
-    borderRadius: 10,
+    backgroundColor: '#121212',
   },
-  noContactsText: {
-    color: '#999',
-    textAlign: 'center',
-    fontFamily: 'System',
+  trackMeContent: {
+    flex: 1,
   },
   mapContainer: {
-    height: 350,
-    borderRadius: 15,
+    height: 300,
+    borderRadius: 12,
     overflow: 'hidden',
     marginBottom: 20,
-    position: 'relative',
+    borderWidth: 1,
+    borderColor: '#333',
+    position: 'relative', // Ensure this is set for absolute positioning of the locate button
   },
   map: {
     ...StyleSheet.absoluteFillObject,
   },
   loadingMap: {
-    ...StyleSheet.absoluteFillObject,
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#1E1E1E',
+  },
+  loadingText: {
+    color: '#E0E0E0',
+  },
+  trackMeButton: {
+    position: 'absolute',
+    bottom: 20,
+    right: 20,
+    backgroundColor: 'rgba(30, 30, 30, 0.8)',
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    justifyContent: 'center',
+    alignItems: 'center',
+    elevation: 5,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 3,
+    borderWidth: 1,
+    borderColor: '#333',
+  },
+  trackMeButtonInner: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: '#1E1E1E',
     justifyContent: 'center',
     alignItems: 'center',
   },
-  loadingText: {
-    color: '#ccc',
-    fontSize: 16,
-    fontFamily: 'System',
-  },
-  locationLabel: {
-    position: 'absolute',
-    top: 20,
-    alignSelf: 'center',
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    paddingHorizontal: 15,
-    paddingVertical: 8,
-    borderRadius: 20,
-  },
-  locationLabelText: {
-    color: 'white',
-    fontSize: 14,
-    fontFamily: 'System',
-  },
-  markerContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  markerDot: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    backgroundColor: '#4285F4',
-  },
-  markerRing: {
-    width: 24,
-    height: 24,
+  infoContainer: {
+    backgroundColor: '#1E1E1E',
+    padding: 15,
     borderRadius: 12,
-    backgroundColor: 'rgba(66, 133, 244, 0.3)',
-    position: 'absolute',
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: '#333',
   },
-  trackButton: {
-    position: 'absolute',
-    bottom: 20,
-    alignSelf: 'center',
+  infoTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#FFF',
+    marginBottom: 8,
   },
-  trackButtonGradient: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 25,
-    borderRadius: 30,
-  },
-  trackButtonIcon: {
-    marginRight: 8,
-  },
-  trackButtonText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: '600',
-    fontFamily: 'System',
+  infoDescription: {
+    fontSize: 14,
+    color: '#CCC',
+    lineHeight: 20,
   },
   bottomNav: {
     flexDirection: 'row',
@@ -1306,67 +1509,148 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     fontFamily: 'System',
   },
-  modalContainer: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'flex-end',
-  },
-  modalContent: {
-    backgroundColor: '#1A1A1A',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    paddingTop: 25,
-    paddingBottom: Platform.OS === 'ios' ? 40 : 25,
-    height: '80%',
-  },
-  modalHeader: {
-    paddingHorizontal: 25,
-    marginBottom: 25,
-  },
-  modalTitle: {
-    color: '#fff',
-    fontSize: 22,
-    fontWeight: 'bold',
-    fontFamily: 'System',
-    marginBottom: 8,
-  },
-  modalSubtitle: {
-    color: '#999',
-    fontSize: 14,
-    fontFamily: 'System',
-  },
-  searchContainer: {
+  batteryContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#2A2A2A',
-    marginHorizontal: 25,
-    marginBottom: 20,
-    borderRadius: 12,
+    backgroundColor: '#1E1E1E',
     paddingHorizontal: 15,
+    paddingVertical: 10,
+    borderRadius: 12,
+    marginBottom: 15,
+    borderWidth: 1,
+    borderColor: '#333',
   },
-  searchIcon: {
+  battery: {
+    width: 40,
+    height: 20,
+    borderWidth: 2,
+    borderColor: '#555',
+    borderRadius: 4,
     marginRight: 10,
+    overflow: 'hidden',
   },
-  searchInput: {
-    flex: 1,
-    height: 50,
-    color: '#fff',
-    fontFamily: 'System',
+  batteryLevel: {
+    height: '100%',
   },
-  selectedCount: {
-    paddingHorizontal: 25,
-    marginBottom: 10,
-  },
-  selectedCountText: {
-    color: '#FF6B9C',
-    fontFamily: 'System',
+  batteryText: {
+    color: '#E0E0E0',
     fontSize: 14,
   },
-  contactsList: {
+  helpLineContent: {
+    paddingBottom: 20,
+  },
+  helpLineHeader: {
+    fontSize: 22,
+    fontWeight: 'bold',
+    color: '#FFF',
+    marginTop: 20,
+    marginBottom: 8,
+  },
+  helpLineSubheader: {
+    fontSize: 14,
+    color: '#999',
+    marginBottom: 20,
+  },
+  emergencyCard: {
+    borderRadius: 15,
+    overflow: 'hidden',
+    marginBottom: 20,
+    elevation: 5,
+    shadowColor: '#E63946',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+  },
+  emergencyCardGradient: {
+    padding: 20,
+  },
+  emergencyCardContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  emergencyCardIconContainer: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 16,
+  },
+  emergencyCardText: {
     flex: 1,
   },
-  contactsListContent: {
-    paddingHorizontal: 25,
+  emergencyCardTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#fff',
+    marginBottom: 4,
+  },
+  emergencyCardNumber: {
+    fontSize: 22,
+    fontWeight: 'bold',
+    color: '#fff',
+    marginBottom: 4,
+  },
+  emergencyCardDescription: {
+    fontSize: 14,
+    color: '#fff',
+    opacity: 0.9,
+  },
+  callNowButton: {
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+  },
+  callNowText: {
+    color: '#fff',
+    fontWeight: 'bold',
+    fontSize: 12,
+  },
+  helplineCard: {
+    backgroundColor: '#1E1E1E',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+    elevation: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 3,
+    borderWidth: 1,
+    borderColor: '#333',
+  },
+  helplineCardContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  helplineCardIcon: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 16,
+  },
+  helplineCardText: {
+    flex: 1,
+  },
+  helplineCardTitle: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#fff',
+    marginBottom: 4,
+  },
+  helplineCardNumber: {
+    fontSize: 18,
+    color: '#fff',
+    fontWeight: 'bold',
+    marginBottom: 4,
+  },
+  helplineCardDescription: {
+    fontSize: 12,
+    color: '#999',
   },
   contactItem: {
     flexDirection: 'row',
@@ -1417,184 +1701,139 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: '#666',
   },
-  modalButtons: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    paddingHorizontal: 25,
-    marginTop: 25,
-  },
-  cancelButton: {
-    flex: 1,
-    paddingVertical: 15,
-    alignItems: 'center',
-    marginRight: 10,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: '#666',
-  },
-  cancelButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontFamily: 'System',
-  },
-  saveButton: {
-    flex: 1,
-    paddingVertical: 15,
-    alignItems: 'center',
-    marginLeft: 10,
-    borderRadius: 10,
-    backgroundColor: '#FF6B9C',
-  },
-  saveButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: 'bold',
-    fontFamily: 'System',
-  },
-  trackMeContent: {
-    padding: 16,
-    backgroundColor: '#f5f5f5',
-    borderRadius: 10,
-    marginTop: 10,
-  },
-  batteryContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 20,
-  },
-  battery: {
-    width: 100,
-    height: 20,
-    borderWidth: 2,
-    borderColor: '#333',
-    borderRadius: 4,
-    marginRight: 10,
-    overflow: 'hidden',
-  },
-  batteryLevel: {
-    height: '100%',
-    backgroundColor: '#4CAF50',
-  },
-  batteryLow: {
-    backgroundColor: '#E63946',
-  },
-  batteryText: {
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  alertSettings: {
-    backgroundColor: '#fff',
-    borderRadius: 8,
-    padding: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  alertTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    marginBottom: 12,
-    color: '#333',
-  },
-  alertOption: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 10,
-  },
-  alertOptionText: {
-    fontSize: 16,
-    color: '#555',
-  },
-  switchContainer: {
-    width: 60,
-    height: 28,
-    borderRadius: 14,
-    padding: 2,
-    backgroundColor: '#e0e0e0',
-  },
-  switchOption: {
-    width: 26,
-    height: 24,
+  emergencyContactsButton: {
     borderRadius: 12,
+    overflow: 'hidden',
+    marginBottom: 20,
+    elevation: 3,
+    shadowColor: '#FF6B9C',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+  },
+  emergencyContactsGradient: {
+    padding: 16,
+  },
+  emergencyContactsContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  emergencyContactsIcon: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
     justifyContent: 'center',
     alignItems: 'center',
+    marginRight: 16,
   },
-  switchActive: {
-    backgroundColor: '#4CAF50',
-    marginLeft: 30,
-  },
-  switchInactive: {
-    backgroundColor: '#999',
-    marginLeft: 0,
-  },
-  switchText: {
-    fontSize: 10,
-    fontWeight: 'bold',
-  },
-  switchActiveText: {
-    color: '#fff',
-  },
-  switchInactiveText: {
-    color: '#fff',
-  },
-  helpLineContent: {
-    padding: 16,
-  },
-  emergencyCard: {
-    borderRadius: 10,
-    padding: 16,
-    marginBottom: 16,
-  },
-  emergencyCardContent: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  emergencyCardText: {
+  emergencyContactsText: {
     flex: 1,
   },
-  emergencyCardTitle: {
-    fontSize: 20,
+  emergencyContactsTitle: {
+    fontSize: 16,
     fontWeight: 'bold',
     color: '#fff',
     marginBottom: 4,
   },
-  emergencyCardDescription: {
-    fontSize: 14,
+  emergencyContactsDescription: {
+    fontSize: 12,
     color: '#fff',
     opacity: 0.9,
   },
-  helplineCard: {
-    backgroundColor: '#fff',
-    borderRadius: 10,
-    padding: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 3,
-    elevation: 2,
-    marginBottom: 12,
+  modalContainer: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'flex-end',
   },
-  helplineCardContent: {
+  modalContent: {
+    backgroundColor: '#1A1A1A',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingBottom: Platform.OS === 'ios' ? 40 : 20,
+    height: '80%',
+  },
+  modalHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+    padding: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: '#333',
   },
-  helplineCardText: {
-    flex: 1,
-  },
-  helplineCardTitle: {
-    fontSize: 16,
+  modalTitle: {
+    fontSize: 20,
     fontWeight: 'bold',
-    color: '#333',
-    marginBottom: 4,
+    color: '#FF6B9C',
   },
-  helplineCardNumber: {
+  selectedContactsContainer: {
+    padding: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: '#333',
+  },
+  selectedContactsTitle: {
     fontSize: 14,
-    color: '#E63946',
+    color: '#CCC',
+    marginBottom: 12,
+  },
+  selectedContactsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+  },
+  selectedContactChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FF6B9C',
+    borderRadius: 20,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginRight: 8,
+    marginBottom: 8,
+  },
+  selectedContactName: {
+    color: '#FFF',
+    marginRight: 4,
+    fontSize: 14,
+  },
+  removeContactButton: {
+    padding: 2,
+  },
+  noContactsText: {
+    color: '#888',
+    fontStyle: 'italic',
+    fontSize: 14,
+  },
+  searchBarContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#2A2A2A',
+    margin: 15,
+    paddingHorizontal: 15,
+    paddingVertical: 10,
+    borderRadius: 10,
+  },
+  searchInput: {
+    flex: 1,
+    color: '#FFF',
+    paddingHorizontal: 10,
+    fontSize: 16,
+  },
+  contactsList: {
+    paddingHorizontal: 20,
+  },
+  saveButton: {
+    margin: 20,
+    borderRadius: 10,
+    overflow: 'hidden',
+  },
+  saveButtonGradient: {
+    paddingVertical: 15,
+    alignItems: 'center',
+  },
+  saveButtonText: {
+    color: '#FFF',
+    fontSize: 16,
     fontWeight: 'bold',
   },
 }); 
