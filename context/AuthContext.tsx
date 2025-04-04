@@ -1,8 +1,9 @@
 import React, { createContext, useState, useContext, useEffect } from 'react';
-import { ClerkProvider, SignedIn, SignedOut, useAuth, useUser } from '@clerk/clerk-expo';
+import { ClerkProvider, SignedIn, SignedOut, useAuth, useUser, useSession } from '@clerk/clerk-expo';
 import * as SecureStore from 'expo-secure-store';
-import { View, ActivityIndicator } from 'react-native';
+import { View, ActivityIndicator, Alert } from 'react-native';
 import { useRouter, useSegments } from 'expo-router';
+import AuthService, { User } from '../services/AuthService';
 
 // Clerk token cache
 const tokenCache = {
@@ -22,7 +23,7 @@ const tokenCache = {
   },
 };
 
-// Get Clerk publishable key from environment
+// Get Clerk configuration from environment
 const CLERK_PUBLISHABLE_KEY = process.env.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY || 'pk_test_cHJpbWUtcG9zc3VtLTY4LmNsZXJrLmFjY291bnRzLmRldiQ';
 
 // Auth context type
@@ -31,6 +32,7 @@ interface AuthContextType {
   isLoaded: boolean;
   userId: string | null | undefined;
   loading: boolean;
+  backendUser: User | null;
   signOut: () => Promise<void>;
 }
 
@@ -40,6 +42,7 @@ const AuthContext = createContext<AuthContextType>({
   isLoaded: false,
   userId: null,
   loading: true,
+  backendUser: null,
   signOut: async () => {},
 });
 
@@ -85,7 +88,10 @@ function InitialLayout() {
 // Main auth provider
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   return (
-    <ClerkProvider publishableKey={CLERK_PUBLISHABLE_KEY} tokenCache={tokenCache}>
+    <ClerkProvider 
+      publishableKey={CLERK_PUBLISHABLE_KEY} 
+      tokenCache={tokenCache}
+    >
       <AuthProviderInternal>{children}</AuthProviderInternal>
     </ClerkProvider>
   );
@@ -93,17 +99,71 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
 // Internal provider to handle auth state
 function AuthProviderInternal({ children }: { children: React.ReactNode }) {
-  const { isSignedIn, isLoaded, signOut } = useAuth();
+  const { isSignedIn, isLoaded, signOut: clerkSignOut } = useAuth();
   const { user } = useUser();
+  const { session } = useSession();
   const [loading, setLoading] = useState(true);
+  const [backendUser, setBackendUser] = useState<User | null>(null);
 
+  // Authenticate with the backend when Clerk auth changes
   useEffect(() => {
-    if (isLoaded) {
-      setTimeout(() => {
+    const syncWithBackend = async () => {
+      if (isLoaded && isSignedIn && user) {
+        try {
+          // Get active session info
+          const sessionId = session?.id || undefined;
+          const sessionToken = await session?.getToken() || undefined;
+          
+          console.log('Syncing with backend using Clerk session', { 
+            userId: user.id, 
+            hasSession: !!session,
+            hasSessionToken: !!sessionToken 
+          });
+          
+          // Call our backend to get a JWT token with session info if available
+          const userData = await AuthService.login(
+            user.id, 
+            sessionId, 
+            sessionToken
+          );
+          
+          setBackendUser(userData);
+          console.log('Successfully authenticated with backend');
+        } catch (error) {
+          console.error('Failed to authenticate with backend:', error);
+          Alert.alert(
+            'Authentication Error',
+            'Failed to connect to the backend service. Please try again.'
+          );
+        }
+      } else if (isLoaded && !isSignedIn) {
+        // Clear backend authentication when signed out of Clerk
+        await AuthService.logout();
+        setBackendUser(null);
+      }
+
+      // Only hide loading after auth is complete
+      if (isLoaded) {
         setLoading(false);
-      }, 300);
+      }
+    };
+
+    syncWithBackend();
+  }, [isSignedIn, isLoaded, user, session]);
+
+  // Custom sign out function that handles both Clerk and our backend
+  const signOut = async () => {
+    try {
+      // First clear our backend token
+      await AuthService.logout();
+      setBackendUser(null);
+      
+      // Then sign out from Clerk
+      await clerkSignOut();
+    } catch (error) {
+      console.error('Error during sign out:', error);
     }
-  }, [isLoaded]);
+  };
 
   // Create auth context value
   const value: AuthContextType = {
@@ -111,6 +171,7 @@ function AuthProviderInternal({ children }: { children: React.ReactNode }) {
     isLoaded: isLoaded,
     userId: user?.id,
     loading,
+    backendUser,
     signOut,
   };
 

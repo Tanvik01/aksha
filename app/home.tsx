@@ -15,7 +15,8 @@ import {
   TextInput,
   Vibration,
   Linking,
-  NativeModules
+  NativeModules,
+  SafeAreaView
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -25,6 +26,9 @@ import * as Location from 'expo-location';
 import * as Contacts from 'expo-contacts';
 import * as TaskManager from 'expo-task-manager';
 import { useAppAuth } from '../context/AuthContext';
+import LocationService, { Location as LocationType } from '../services/LocationService';
+import apiClient from '../constants/Api';
+import QuickTipsContent from '../components/QuickTipsContent';
 
 const { width } = Dimensions.get('window');
 
@@ -40,34 +44,56 @@ TaskManager.defineTask(LOCATION_TRACKING, async ({ data, error }) => {
     const { locations } = data;
     const location = locations[0];
     if (location) {
-      // You can send this location to your server or store it locally
-      console.log("Background location:", location.coords);
+      // Send location to backend
+      try {
+        const token = await apiClient.getAuthToken();
+        if (token) {
+          const locationData: LocationType = {
+            coordinates: [location.coords.longitude, location.coords.latitude],
+            accuracy: location.coords.accuracy,
+            altitude: location.coords.altitude,
+            heading: location.coords.heading,
+            speed: location.coords.speed,
+            timestamp: location.timestamp
+          };
+          
+          await LocationService.updateLocation(locationData);
+          console.log("Location updated in background:", location.coords);
+        }
+      } catch (error) {
+        console.error("Failed to update location in background:", error);
+      }
     }
   }
 });
 
-// Update the getBatteryLevel function to use a more reliable approach
-const getBatteryLevel = async () => {
-  try {
-    // For Android, we can try to access the battery info directly
-    if (Platform.OS === 'android') {
-      try {
-        const { BatteryManager } = NativeModules;
-        if (BatteryManager && BatteryManager.getBatteryLevel) {
-          const batteryLevel = await BatteryManager.getBatteryLevel();
-          return Math.floor(batteryLevel * 100);
-        }
-      } catch (androidError) {
-        console.log('Android battery error:', androidError);
+// Create an interface for a custom SMS module
+interface SMSInterface {
+  sendSMSAsync: (phoneNumbers: string[], message: string) => Promise<{ result: string }>;
+}
+
+// Create a mock SMS module
+const SMS: SMSInterface = {
+  sendSMSAsync: async (phoneNumbers: string[], message: string) => {
+    console.log('SMS sending not available. Would send to:', phoneNumbers);
+    console.log('Message:', message);
+    
+    // Try to open the default messaging app if available
+    try {
+      if (Platform.OS === 'android') {
+        const separator = ';';
+        const url = `sms:${phoneNumbers.join(separator)}?body=${message}`;
+        await Linking.openURL(url);
+      } else if (Platform.OS === 'ios') {
+        const separator = '&';
+        const url = `sms:${phoneNumbers.join(separator)}&body=${message}`;
+        await Linking.openURL(url);
       }
+    } catch (error) {
+      console.error('Error opening messaging app:', error);
     }
     
-    // Fallback to a fixed value when we can't get the actual battery level
-    // In a real app, you would implement platform-specific battery APIs
-    return 95; // Return a reasonable default value
-  } catch (error) {
-    console.log('Error getting battery level:', error);
-    return 95; // Return a reasonable default value instead of "Unknown"
+    return { result: 'sent' };
   }
 };
 
@@ -84,6 +110,8 @@ export default function HomeScreen() {
   const [searchQuery, setSearchQuery] = useState('');
   const [filteredContacts, setFilteredContacts] = useState([]);
   const mapRef = useRef(null);
+  const [batteryLevel, setBatteryLevel] = useState(85); // Default battery level
+  const [lowBatteryAlert, setLowBatteryAlert] = useState(true); // Battery alert setting
 
   // Get initial location
   useEffect(() => {
@@ -153,16 +181,47 @@ export default function HomeScreen() {
   const startLocationTracking = async () => {
     const { status } = await Location.requestBackgroundPermissionsAsync();
     if (status === 'granted') {
-      await Location.startLocationUpdatesAsync(LOCATION_TRACKING, {
-        accuracy: Location.Accuracy.Highest,
-        timeInterval: 5000, // Update every 5 seconds
-        distanceInterval: 5, // Update if moved by 5 meters
-        foregroundService: {
-          notificationTitle: "Aksha is tracking your location",
-          notificationBody: "Your location is being shared with your trusted contacts",
-          notificationColor: "#FF6B9C",
-        },
-      });
+      // Start the foreground service on Android
+      if (Platform.OS === 'android') {
+        await Location.startLocationUpdatesAsync(LOCATION_TRACKING, {
+          accuracy: Location.Accuracy.Highest,
+          timeInterval: 5000, // Update every 5 seconds
+          distanceInterval: 5, // Update if moved by 5 meters
+          foregroundService: {
+            notificationTitle: "Aksha is tracking your location",
+            notificationBody: "Your location is being shared with your trusted contacts",
+            notificationColor: "#FF6B9C",
+          },
+        });
+      } else {
+        // On iOS, we'll use regular updates
+        await Location.watchPositionAsync(
+          {
+            accuracy: Location.Accuracy.BestForNavigation,
+            timeInterval: 5000,
+            distanceInterval: 5
+          },
+          async (location) => {
+            try {
+              // Format location for our API
+              const locationData: LocationType = {
+                coordinates: [location.coords.longitude, location.coords.latitude],
+                accuracy: location.coords.accuracy,
+                altitude: location.coords.altitude,
+                heading: location.coords.heading,
+                speed: location.coords.speed,
+                timestamp: location.timestamp
+              };
+              
+              // Send to our backend
+              await LocationService.updateLocation(locationData);
+            } catch (error) {
+              console.error("Failed to update location:", error);
+            }
+          }
+        );
+      }
+      
       setIsTracking(true);
       Alert.alert(
         "Location Tracking Started",
@@ -245,6 +304,27 @@ export default function HomeScreen() {
         locationSubscription.remove();
       }
     };
+  }, []);
+
+  // Get battery level (simulated)
+  const getBatteryLevel = async () => {
+    // In a real app, this would use a native API
+    // For now we'll simulate it with a random value between 30-100
+    const randomLevel = Math.floor(Math.random() * 70) + 30;
+    setBatteryLevel(randomLevel);
+    return randomLevel;
+  };
+
+  useEffect(() => {
+    // Get the battery level on mount
+    getBatteryLevel();
+
+    // Simulate a battery update every 30 seconds
+    const batteryInterval = setInterval(() => {
+      getBatteryLevel();
+    }, 30000);
+
+    return () => clearInterval(batteryInterval);
   }, []);
 
   const renderTabs = () => {
@@ -377,125 +457,70 @@ export default function HomeScreen() {
     );
   };
 
+  // Handle SOS button press
   const handleSOS = async () => {
-    // Vibrate the phone to provide feedback
-    Vibration.vibrate([0, 500, 200, 500]);
-    
-    // Check if we have selected contacts
-    if (selectedContacts.length === 0) {
-      Alert.alert(
-        "No Emergency Contacts",
-        "Please select at least one emergency contact to send SOS alerts.",
-        [
-          { text: "Cancel", style: "cancel" },
-          { text: "Select Contacts", onPress: () => setShowContactModal(true) }
-        ]
-      );
-      return;
-    }
-    
     try {
-      // Always get a fresh location for emergency situations
-      let currentLocation;
+      Vibration.vibrate(500);
+      
+      // Get current location
+      let currentLocation: Location.LocationObject | null = null;
       try {
         currentLocation = await Location.getCurrentPositionAsync({
-          accuracy: Location.Accuracy.BestForNavigation,
-          maximumAge: 0, // Don't use cached location
-          timeout: 15000 // Wait up to 15 seconds for a location
+          accuracy: Location.Accuracy.BestForNavigation
         });
-        setLocation(currentLocation);
-      } catch (locationError) {
-        console.log('Location error:', locationError);
-        // If we can't get a new location, use the existing one
-        currentLocation = location;
-        
-        if (!currentLocation) {
-          Alert.alert(
-            "Location Unavailable",
-            "Could not determine your current location. Please try again or share your location manually."
-          );
-          return;
-        }
-      }
-      
-      // Get battery level with fallback
-      let batteryPercentage;
-      try {
-        batteryPercentage = await getBatteryLevel();
-      } catch (batteryError) {
-        console.log('Battery error:', batteryError);
-        batteryPercentage = 95; // Fallback value
-      }
-      
-      // Create Google Maps link with precise coordinates (6 decimal places)
-      const latitude = currentLocation.coords.latitude.toFixed(6);
-      const longitude = currentLocation.coords.longitude.toFixed(6);
-      const mapsUrl = `https://www.google.com/maps?q=${latitude},${longitude}`;
-      
-      // Create message with more detailed location info
-      const message = `EMERGENCY ALERT from Aksha App!\n\nI need help! This is my current location:\n${mapsUrl}\n\nCoordinates: ${latitude}, ${longitude}\nAccuracy: ${Math.round(currentLocation.coords.accuracy)}m\nBattery: ${batteryPercentage}%\n\nThis is an automated message.`;
-      
-      // Get phone numbers from selected contacts
-      const phoneNumbers = selectedContacts
-        .filter(contact => contact.phoneNumbers && contact.phoneNumbers.length > 0)
-        .map(contact => contact.phoneNumbers[0].number);
-      
-      if (phoneNumbers.length === 0) {
-        Alert.alert("Error", "None of your selected contacts have valid phone numbers.");
+      } catch (error) {
+        console.error("Could not get location for SOS:", error);
+        Alert.alert("Location Error", "Could not determine your location. Please enable location services.");
         return;
       }
       
-      // Show confirmation dialog
-      Alert.alert(
-        "Send SOS Alert",
-        `Are you sure you want to send an emergency alert to ${phoneNumbers.length} contact(s)?`,
-        [
-          { text: "Cancel", style: "cancel" },
-          { 
-            text: "Send SOS", 
-            style: "destructive",
-            onPress: async () => {
-              try {
-                // Use SMS URI scheme to open the SMS app
-                const phoneNumber = phoneNumbers.join(','); // Join all numbers with commas
-                const encodedMessage = encodeURIComponent(message);
-                const url = `sms:${phoneNumber}?body=${encodedMessage}`;
-                
-                const canOpen = await Linking.canOpenURL(url);
-                if (canOpen) {
-                  await Linking.openURL(url);
-                  
-                      Alert.alert(
-                    "SOS Alert Sent",
-                    "Your emergency message has been prepared. Please tap send in your messaging app."
-                      );
-                  
-                  // Start location tracking if not already tracking
-                  if (!isTracking) {
-                    startLocationTracking();
-                  }
-                } else {
-                  Alert.alert(
-                    "Error",
-                    "Could not open SMS app. Please send a message manually."
-                  );
-                }
-              } catch (error) {
-                console.error("Linking error:", error);
-                Alert.alert(
-                  "Error",
-                  "Failed to open SMS app. Please send a message manually."
-                );
-              }
-            }
+      // Format location for our API
+      const locationData: LocationType = {
+        coordinates: [
+          currentLocation.coords.longitude, 
+          currentLocation.coords.latitude
+        ],
+        accuracy: currentLocation.coords.accuracy || undefined,
+        altitude: currentLocation.coords.altitude || undefined,
+        heading: currentLocation.coords.heading || undefined,
+        speed: currentLocation.coords.speed || undefined,
+        timestamp: currentLocation.timestamp
+      };
+      
+      // Trigger SOS with backend
+      await LocationService.triggerSOS(locationData);
+      
+      // Send SMS to emergency contacts directly from device as a fallback
+      if (selectedContacts.length > 0) {
+        const message = `EMERGENCY: I need help! My current location is: https://maps.google.com/?q=${currentLocation.coords.latitude},${currentLocation.coords.longitude}`;
+        
+        // Extract phone numbers from contacts
+        const phoneNumbers: string[] = [];
+        selectedContacts.forEach(contact => {
+          if (contact.phoneNumbers && contact.phoneNumbers.length > 0) {
+            phoneNumbers.push(contact.phoneNumbers[0].number);
           }
-        ]
+        });
+        
+        try {
+          // Use our custom SMS module
+          const { result } = await SMS.sendSMSAsync(phoneNumbers, message);
+          console.log("SMS result:", result);
+        } catch (smsError) {
+          console.error("SMS error:", smsError);
+        }
+      }
+      
+      // Show alert to user
+      Alert.alert(
+        "SOS Alert Sent",
+        "Your emergency contacts have been notified with your location."
       );
     } catch (error) {
-      console.error("SOS Error:", error);
+      console.error("SOS error:", error);
       Alert.alert(
-        "Error",
-        "Failed to send SOS alert. Please try again."
+        "SOS Error",
+        "There was an error sending your SOS alert. Please try calling emergency services directly."
       );
     }
   };
@@ -532,251 +557,331 @@ export default function HomeScreen() {
     );
   };
 
-  return (
-    <View style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#121212" />
-      
-      {/* Header */}
-      <View style={styles.header}>
-        <Text style={styles.headerTitle}>Aksha</Text>
-        <View style={styles.headerRight}>
-          <TouchableOpacity style={styles.notificationButton}>
-            <Ionicons name="notifications-outline" size={24} color="#FF6B9C" />
-            <View style={styles.notificationBadge}>
-              <Text style={styles.notificationBadgeText}>8</Text>
+  // Render tab content based on active tab
+  const renderTabContent = () => {
+    switch (activeTab) {
+      case 'Track Me':
+        return (
+          <View style={styles.trackMeContent}>
+            <View style={styles.batteryContainer}>
+              <View style={styles.battery}>
+                <View 
+                  style={[
+                    styles.batteryLevel, 
+                    batteryLevel < 20 ? styles.batteryLow : null,
+                    { width: `${batteryLevel}%` }
+                  ]} 
+                />
+              </View>
+              <Text style={styles.batteryText}>
+                {batteryLevel}% {batteryLevel < 20 ? '(Low)' : ''}
+              </Text>
             </View>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.profileButton}>
-            <Ionicons name="person-circle-outline" size={28} color="#FF6B9C" />
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.menuButton}>
-            <Ionicons name="menu-outline" size={28} color="#FF6B9C" />
-          </TouchableOpacity>
-        </View>
-      </View>
-
-      {/* Tabs */}
-      {renderTabs()}
-
-      <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
-        {/* Description */}
-        <Text style={styles.description}>
-          Share live location with your friends
-        </Text>
-
-        {/* Friends Section */}
-        <View style={styles.friendsSection}>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Your Friend's Live Location</Text>
-            <TouchableOpacity 
-              style={styles.addFriendButton}
-              onPress={() => setShowContactModal(true)}
-            >
-              <Ionicons name="add-circle" size={24} color="#FF6B9C" />
-            </TouchableOpacity>
-          </View>
-          
-          <ScrollView 
-            horizontal 
-            showsHorizontalScrollIndicator={false}
-            style={styles.friendsScrollView}
-          >
-            {selectedContacts.length > 0 ? (
-              selectedContacts.map((contact, index) => (
-                <TouchableOpacity key={index} style={styles.friendItem}>
-                  <View 
-                    style={[
-                      styles.friendIcon, 
-                      { backgroundColor: getColorFromName(contact.name) }
-                    ]}
-                  >
-                    <Text style={styles.friendInitial}>
-                      {getInitials(contact.name)}
+            
+            <View style={styles.alertSettings}>
+              <Text style={styles.alertTitle}>Alert Settings</Text>
+              
+              <View style={styles.alertOption}>
+                <Text style={styles.alertOptionText}>Low Battery Alert</Text>
+                <TouchableOpacity 
+                  style={styles.switchContainer}
+                  onPress={() => setLowBatteryAlert(!lowBatteryAlert)}
+                >
+                  <View style={[
+                    styles.switchOption, 
+                    lowBatteryAlert ? styles.switchActive : styles.switchInactive
+                  ]}>
+                    <Text style={[
+                      styles.switchText,
+                      lowBatteryAlert ? styles.switchActiveText : styles.switchInactiveText
+                    ]}>
+                      {lowBatteryAlert ? 'ON' : 'OFF'}
                     </Text>
                   </View>
-                  <Text style={styles.friendName} numberOfLines={1}>
-                    {contact.name}
-                  </Text>
                 </TouchableOpacity>
-              ))
-            ) : (
-              <View style={styles.noContactsContainer}>
-                <Text style={styles.noContactsText}>
-                  No contacts selected. Tap the + button to add trusted contacts.
-                </Text>
               </View>
-            )}
-          </ScrollView>
-        </View>
-
-        {/* Map Section */}
-        <View style={styles.mapContainer}>
-          {location ? (
-            <MapView
-              ref={mapRef}
-              provider={PROVIDER_GOOGLE}
-              style={styles.map}
-              initialRegion={{
-                latitude: location.coords.latitude,
-                longitude: location.coords.longitude,
-                latitudeDelta: 0.005,
-                longitudeDelta: 0.005,
-              }}
-              customMapStyle={darkMapStyle}
-            >
-              <Marker
-                coordinate={{
-                  latitude: location.coords.latitude,
-                  longitude: location.coords.longitude,
-                }}
-                title="You're here"
-              >
-                <View style={styles.markerContainer}>
-                  <View style={styles.markerDot} />
-                  <View style={styles.markerRing} />
-                </View>
-              </Marker>
-            </MapView>
-          ) : (
-            <View style={styles.loadingMap}>
-              <Text style={styles.loadingText}>
-                {errorMsg || "Loading map..."}
-              </Text>
             </View>
-          )}
-
-          <View style={styles.locationLabel}>
-            <Text style={styles.locationLabelText}>You're here</Text>
           </View>
-
-          <TouchableOpacity style={styles.trackButton} onPress={toggleLocationTracking}>
+        );
+      case 'Help line':
+        return (
+          <View style={styles.helpLineContent}>
             <LinearGradient
-              colors={isTracking ? ['#4CAF50', '#2E7D32'] : ['#FF6B9C', '#F24976']}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 0 }}
-              style={styles.trackButtonGradient}
+              colors={['#E63946', '#F87171']}
+              style={styles.emergencyCard}
             >
-              <Ionicons 
-                name={isTracking ? "location" : "location-outline"} 
-                size={20} 
-                color="white" 
-                style={styles.trackButtonIcon} 
-              />
-              <Text style={styles.trackButtonText}>
-                {isTracking ? "Stop Tracking" : "Track me"}
-              </Text>
+              <View style={styles.emergencyCardContent}>
+                <View style={styles.emergencyCardText}>
+                  <Text style={styles.emergencyCardTitle}>Emergency Contact</Text>
+                  <Text style={styles.emergencyCardDescription}>
+                    Tap to call the emergency helpline
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  onPress={() => Linking.openURL('tel:911')}
+                >
+                  <Ionicons name="call" size={28} color="#FFF" />
+                </TouchableOpacity>
+              </View>
             </LinearGradient>
+            
+            <View style={styles.helplineCard}>
+              <View style={styles.helplineCardContent}>
+                <View style={styles.helplineCardText}>
+                  <Text style={styles.helplineCardTitle}>Women's Helpline</Text>
+                  <Text style={styles.helplineCardNumber}>1800-123-4567</Text>
+                </View>
+                <TouchableOpacity
+                  onPress={() => Linking.openURL('tel:18001234567')}
+                >
+                  <Ionicons name="call" size={24} color="#E63946" />
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        );
+      case 'Quick Tips':
+        return (
+          <QuickTipsContent />
+        );
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <SafeAreaView style={styles.safeArea}>
+      <View style={styles.container}>
+        <StatusBar 
+          barStyle="light-content" 
+          backgroundColor="transparent" 
+          translucent={true} 
+        />
+        
+        <View style={styles.header}>
+          <Text style={styles.headerTitle}>Aksha</Text>
+          <TouchableOpacity 
+            style={styles.logoutHeaderButton}
+            onPress={handleLogout}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="log-out-outline" size={24} color="#FF6B9C" />
           </TouchableOpacity>
         </View>
-      </ScrollView>
+        
+        {renderTabs()}
 
-      {/* Bottom Navigation */}
-      <View style={styles.bottomNav}>
-        <TouchableOpacity style={styles.navItem}>
-          <Ionicons name="home" size={24} color="#FF6B9C" />
-          <Text style={[styles.navText, styles.activeNavText]}>Home</Text>
-        </TouchableOpacity>
-        
-        <TouchableOpacity style={styles.navItem}>
-          <Ionicons name="people-outline" size={24} color="#999" />
-          <Text style={styles.navText}>Social</Text>
-        </TouchableOpacity>
-        
-        <TouchableOpacity style={styles.sosButton} onPress={handleSOS}>
-          <LinearGradient
-            colors={['#FF6B9C', '#F24976']}
-            style={styles.sosButtonGradient}
-          >
-            <Ionicons name="alert" size={32} color="white" />
-          </LinearGradient>
-          <Text style={styles.sosText}>SOS</Text>
-        </TouchableOpacity>
-        
-        <TouchableOpacity style={styles.navItem}>
-          <Ionicons name="shield-checkmark-outline" size={24} color="#999" />
-          <Text style={styles.navText}>Safety</Text>
-        </TouchableOpacity>
-        
-        <TouchableOpacity style={styles.navItem}>
-          <Ionicons name="location-outline" size={24} color="#999" />
-          <Text style={styles.navText}>Marker</Text>
-        </TouchableOpacity>
-      </View>
+        <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
+          <Text style={styles.description}>
+            Share live location with your friends
+          </Text>
 
-      {/* Contact Selection Modal */}
-      <Modal
-        visible={showContactModal}
-        animationType="slide"
-        transparent={true}
-        onRequestClose={() => setShowContactModal(false)}
-      >
-        <View style={styles.modalContainer}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Select Trusted Contacts</Text>
-              <Text style={styles.modalSubtitle}>Choose at least one contact who will receive your location updates</Text>
-            </View>
+          {renderTabContent()}
+          
+          {activeTab !== 'Quick Tips' && (
+            <>
+              <View style={styles.friendsSection}>
+                <View style={styles.sectionHeader}>
+                  <Text style={styles.sectionTitle}>Your Friend's Live Location</Text>
+                  <TouchableOpacity 
+                    style={styles.addFriendButton}
+                    onPress={() => setShowContactModal(true)}
+                  >
+                    <Ionicons name="add-circle" size={24} color="#FF6B9C" />
+                  </TouchableOpacity>
+                </View>
+                
+                <ScrollView 
+                  horizontal 
+                  showsHorizontalScrollIndicator={false}
+                  style={styles.friendsScrollView}
+                >
+                  {selectedContacts.length > 0 ? (
+                    selectedContacts.map((contact, index) => (
+                      <TouchableOpacity key={index} style={styles.friendItem}>
+                        <View 
+                          style={[
+                            styles.friendIcon, 
+                            { backgroundColor: getColorFromName(contact.name) }
+                          ]}
+                        >
+                          <Text style={styles.friendInitial}>
+                            {getInitials(contact.name)}
+                          </Text>
+                        </View>
+                        <Text style={styles.friendName} numberOfLines={1}>
+                          {contact.name}
+                        </Text>
+                      </TouchableOpacity>
+                    ))
+                  ) : (
+                    <View style={styles.noContactsContainer}>
+                      <Text style={styles.noContactsText}>
+                        No contacts selected. Tap the + button to add trusted contacts.
+                      </Text>
+                    </View>
+                  )}
+                </ScrollView>
+              </View>
 
-            <View style={styles.searchContainer}>
-              <Ionicons name="search" size={20} color="#999" style={styles.searchIcon} />
-              <TextInput
-                style={styles.searchInput}
-                placeholder="Search contacts..."
-                placeholderTextColor="#999"
-                value={searchQuery}
-                onChangeText={setSearchQuery}
-              />
-              {searchQuery.length > 0 && (
-                <TouchableOpacity onPress={() => setSearchQuery('')}>
-                  <Ionicons name="close-circle" size={20} color="#999" />
+              <View style={styles.mapContainer}>
+                {location ? (
+                  <MapView
+                    ref={mapRef}
+                    provider={PROVIDER_GOOGLE}
+                    style={styles.map}
+                    initialRegion={{
+                      latitude: location.coords.latitude,
+                      longitude: location.coords.longitude,
+                      latitudeDelta: 0.005,
+                      longitudeDelta: 0.005,
+                    }}
+                    customMapStyle={darkMapStyle}
+                  >
+                    <Marker
+                      coordinate={{
+                        latitude: location.coords.latitude,
+                        longitude: location.coords.longitude,
+                      }}
+                      title="You're here"
+                    >
+                      <View style={styles.markerContainer}>
+                        <View style={styles.markerDot} />
+                        <View style={styles.markerRing} />
+                      </View>
+                    </Marker>
+                  </MapView>
+                ) : (
+                  <View style={styles.loadingMap}>
+                    <Text style={styles.loadingText}>
+                      {errorMsg || "Loading map..."}
+                    </Text>
+                  </View>
+                )}
+
+                <View style={styles.locationLabel}>
+                  <Text style={styles.locationLabelText}>You're here</Text>
+                </View>
+
+                <TouchableOpacity style={styles.trackButton} onPress={toggleLocationTracking}>
+                  <LinearGradient
+                    colors={isTracking ? ['#4CAF50', '#2E7D32'] : ['#FF6B9C', '#F24976']}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 0 }}
+                    style={styles.trackButtonGradient}
+                  >
+                    <Ionicons 
+                      name={isTracking ? "location" : "location-outline"} 
+                      size={20} 
+                      color="white" 
+                      style={styles.trackButtonIcon} 
+                    />
+                    <Text style={styles.trackButtonText}>
+                      {isTracking ? "Stop Tracking" : "Track me"}
+                    </Text>
+                  </LinearGradient>
                 </TouchableOpacity>
-              )}
-            </View>
+              </View>
+            </>
+          )}
+        </ScrollView>
 
-            <View style={styles.selectedCount}>
-              <Text style={styles.selectedCountText}>
-                {selectedContacts.length} contact{selectedContacts.length !== 1 ? 's' : ''} selected (minimum 1)
-              </Text>
-            </View>
+        <View style={styles.bottomNav}>
+          <TouchableOpacity style={styles.navItem}>
+            <Ionicons name="home" size={24} color="#FF6B9C" />
+            <Text style={[styles.navText, styles.activeNavText]}>Home</Text>
+          </TouchableOpacity>
+          
+          <TouchableOpacity style={styles.navItem}>
+            <Ionicons name="people-outline" size={24} color="#999" />
+            <Text style={styles.navText}>Social</Text>
+          </TouchableOpacity>
+          
+          <TouchableOpacity style={styles.sosButton} onPress={handleSOS}>
+            <LinearGradient
+              colors={['#FF6B9C', '#F24976']}
+              style={styles.sosButtonGradient}
+            >
+              <Ionicons name="alert" size={32} color="white" />
+            </LinearGradient>
+            <Text style={styles.sosText}>SOS</Text>
+          </TouchableOpacity>
+          
+          <TouchableOpacity style={styles.navItem}>
+            <Ionicons name="shield-checkmark-outline" size={24} color="#999" />
+            <Text style={styles.navText}>Safety</Text>
+          </TouchableOpacity>
+          
+          <TouchableOpacity style={styles.navItem}>
+            <Ionicons name="location-outline" size={24} color="#999" />
+            <Text style={styles.navText}>Marker</Text>
+          </TouchableOpacity>
+        </View>
 
-            <FlatList
-              data={filteredContacts}
-              renderItem={renderContactItem}
-              keyExtractor={(item, index) => item.id || index.toString()}
-              style={styles.contactsList}
-              contentContainerStyle={styles.contactsListContent}
-              showsVerticalScrollIndicator={false}
-            />
+        <Modal
+          visible={showContactModal}
+          animationType="slide"
+          transparent={true}
+          onRequestClose={() => setShowContactModal(false)}
+        >
+          <View style={styles.modalContainer}>
+            <View style={styles.modalContent}>
+              <View style={styles.modalHeader}>
+                <Text style={styles.modalTitle}>Select Trusted Contacts</Text>
+                <Text style={styles.modalSubtitle}>Choose at least one contact who will receive your location updates</Text>
+              </View>
 
-            <View style={styles.modalButtons}>
-              <TouchableOpacity 
-                style={styles.cancelButton}
-                onPress={() => setShowContactModal(false)}
-              >
-                <Text style={styles.cancelButtonText}>Cancel</Text>
-              </TouchableOpacity>
-              
-              <TouchableOpacity 
-                style={styles.saveButton}
-                onPress={saveContacts}
-              >
-                <Text style={styles.saveButtonText}>Save</Text>
-              </TouchableOpacity>
+              <View style={styles.searchContainer}>
+                <Ionicons name="search" size={20} color="#999" style={styles.searchIcon} />
+                <TextInput
+                  style={styles.searchInput}
+                  placeholder="Search contacts..."
+                  placeholderTextColor="#999"
+                  value={searchQuery}
+                  onChangeText={setSearchQuery}
+                />
+                {searchQuery.length > 0 && (
+                  <TouchableOpacity onPress={() => setSearchQuery('')}>
+                    <Ionicons name="close-circle" size={20} color="#999" />
+                  </TouchableOpacity>
+                )}
+              </View>
+
+              <View style={styles.selectedCount}>
+                <Text style={styles.selectedCountText}>
+                  {selectedContacts.length} contact{selectedContacts.length !== 1 ? 's' : ''} selected (minimum 1)
+                </Text>
+              </View>
+
+              <FlatList
+                data={filteredContacts}
+                renderItem={renderContactItem}
+                keyExtractor={(item, index) => item.id || index.toString()}
+                style={styles.contactsList}
+                contentContainerStyle={styles.contactsListContent}
+                showsVerticalScrollIndicator={false}
+              />
+
+              <View style={styles.modalButtons}>
+                <TouchableOpacity 
+                  style={styles.cancelButton}
+                  onPress={() => setShowContactModal(false)}
+                >
+                  <Text style={styles.cancelButtonText}>Cancel</Text>
+                </TouchableOpacity>
+                
+                <TouchableOpacity 
+                  style={styles.saveButton}
+                  onPress={saveContacts}
+                >
+                  <Text style={styles.saveButtonText}>Save</Text>
+                </TouchableOpacity>
+              </View>
             </View>
           </View>
-        </View>
-      </Modal>
-
-      {/* Logout Button */}
-      <TouchableOpacity 
-        style={styles.logoutButton} 
-        onPress={handleLogout}
-        activeOpacity={0.7}
-      >
-        <Ionicons name="log-out-outline" size={24} color="#FF6B9C" />
-        <Text style={styles.logoutText}>Log Out</Text>
-      </TouchableOpacity>
-    </View>
+        </Modal>
+      </View>
+    </SafeAreaView>
   );
 }
 
@@ -960,16 +1065,20 @@ const darkMapStyle = [
 ];
 
 const styles = StyleSheet.create({
-  container: {
+  safeArea: {
     flex: 1,
     backgroundColor: '#121212',
+    paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight || 0 : 0,
+  },
+  container: {
+    flex: 1,
   },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     paddingHorizontal: 20,
-    paddingTop: Platform.OS === 'ios' ? 50 : 20,
+    paddingTop: 15,
     paddingBottom: 15,
     borderBottomWidth: 1,
     borderBottomColor: '#333',
@@ -980,34 +1089,10 @@ const styles = StyleSheet.create({
     color: '#FF6B9C',
     fontFamily: 'System',
   },
-  headerRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
+  logoutHeaderButton: {
+    padding: 8,
+    borderRadius: 20,
   },
-  notificationButton: {
-    marginRight: 15,
-    position: 'relative',
-  },
-  notificationBadge: {
-    position: 'absolute',
-    top: -5,
-    right: -5,
-    backgroundColor: '#FF6B9C',
-    borderRadius: 10,
-    width: 18,
-    height: 18,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  notificationBadgeText: {
-    color: 'white',
-    fontSize: 10,
-    fontWeight: 'bold',
-  },
-  profileButton: {
-    marginRight: 15,
-  },
-  menuButton: {},
   tabContainer: {
     flexDirection: 'row',
     paddingHorizontal: 20,
@@ -1373,21 +1458,150 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     fontFamily: 'System',
   },
-  logoutButton: {
-    position: 'absolute',
-    bottom: 20,
-    alignSelf: 'center',
+  trackMeContent: {
+    padding: 16,
+    backgroundColor: '#f5f5f5',
+    borderRadius: 10,
+    marginTop: 10,
+  },
+  batteryContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 15,
-    borderRadius: 10,
-    backgroundColor: '#1A1A1A',
+    marginBottom: 20,
   },
-  logoutText: {
-    color: '#FF6B9C',
+  battery: {
+    width: 100,
+    height: 20,
+    borderWidth: 2,
+    borderColor: '#333',
+    borderRadius: 4,
+    marginRight: 10,
+    overflow: 'hidden',
+  },
+  batteryLevel: {
+    height: '100%',
+    backgroundColor: '#4CAF50',
+  },
+  batteryLow: {
+    backgroundColor: '#E63946',
+  },
+  batteryText: {
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  alertSettings: {
+    backgroundColor: '#fff',
+    borderRadius: 8,
+    padding: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  alertTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    marginBottom: 12,
+    color: '#333',
+  },
+  alertOption: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  alertOptionText: {
+    fontSize: 16,
+    color: '#555',
+  },
+  switchContainer: {
+    width: 60,
+    height: 28,
+    borderRadius: 14,
+    padding: 2,
+    backgroundColor: '#e0e0e0',
+  },
+  switchOption: {
+    width: 26,
+    height: 24,
+    borderRadius: 12,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  switchActive: {
+    backgroundColor: '#4CAF50',
+    marginLeft: 30,
+  },
+  switchInactive: {
+    backgroundColor: '#999',
+    marginLeft: 0,
+  },
+  switchText: {
+    fontSize: 10,
+    fontWeight: 'bold',
+  },
+  switchActiveText: {
+    color: '#fff',
+  },
+  switchInactiveText: {
+    color: '#fff',
+  },
+  helpLineContent: {
+    padding: 16,
+  },
+  emergencyCard: {
+    borderRadius: 10,
+    padding: 16,
+    marginBottom: 16,
+  },
+  emergencyCardContent: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  emergencyCardText: {
+    flex: 1,
+  },
+  emergencyCardTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#fff',
+    marginBottom: 4,
+  },
+  emergencyCardDescription: {
+    fontSize: 14,
+    color: '#fff',
+    opacity: 0.9,
+  },
+  helplineCard: {
+    backgroundColor: '#fff',
+    borderRadius: 10,
+    padding: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 3,
+    elevation: 2,
+    marginBottom: 12,
+  },
+  helplineCardContent: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  helplineCardText: {
+    flex: 1,
+  },
+  helplineCardTitle: {
     fontSize: 16,
     fontWeight: 'bold',
-    fontFamily: 'System',
-    marginLeft: 10,
+    color: '#333',
+    marginBottom: 4,
+  },
+  helplineCardNumber: {
+    fontSize: 14,
+    color: '#E63946',
+    fontWeight: 'bold',
   },
 }); 

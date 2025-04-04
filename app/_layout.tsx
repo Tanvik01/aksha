@@ -1,6 +1,7 @@
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { AuthProvider } from '../context/AuthContext';
+import FloatingChatbot from '../components/FloatingChatbot';
 
 export default function Layout() {
   return (
@@ -14,11 +15,14 @@ export default function Layout() {
           animationDuration: 300,
         }}
       >
-        <Stack.Screen name="index" />
-        <Stack.Screen name="auth/login" />
-        <Stack.Screen name="auth/signup" />
-        <Stack.Screen name="home" />
+        <Stack.Screen name="index" options={{ headerShown: false }} />
+        <Stack.Screen name="home" options={{ headerShown: false }} />
+        <Stack.Screen name="auth/login" options={{ headerShown: false }} />
+        <Stack.Screen name="auth/signup" options={{ headerShown: false }} />
       </Stack>
+      
+      {/* Floating Chatbot visible on all screens */}
+      <FloatingChatbot />
     </AuthProvider>
   );
 }
