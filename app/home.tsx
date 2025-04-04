@@ -32,6 +32,11 @@ import QuickTipsContent from '../components/QuickTipsContent';
 import * as Battery from 'expo-battery';
 import FloatingChatbot from '../components/FloatingChatbot';
 import { useAuth } from '@clerk/clerk-expo';
+import BottomNav from '../components/BottomNav';
+import { Audio } from 'expo-av';
+import { shareAsync } from 'expo-sharing';
+import * as FileSystem from 'expo-file-system';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const { width } = Dimensions.get('window');
 
@@ -118,6 +123,14 @@ export default function HomeScreen() {
   const [batteryAlertShown, setBatteryAlertShown] = useState(false);
   const [lastKnownLocation, setLastKnownLocation] = useState(null);
   const [hasShownContactsPrompt, setHasShownContactsPrompt] = useState(false);
+  const [recording, setRecording] = useState<Audio.Recording | null>(null);
+  const [recordingStatus, setRecordingStatus] = useState<'idle' | 'recording' | 'stopped'>('idle');
+  const [audioPermission, setAudioPermission] = useState<boolean>(false);
+  const [recordedURI, setRecordedURI] = useState<string | null>(null);
+
+  // Inside the HomeScreen component, add the following constants for storage keys
+  const CONTACTS_STORAGE_KEY = 'emergency_contacts';
+  const AUDIO_DIRECTORY = FileSystem.documentDirectory + 'sos_recordings/';
 
   // Get initial location
   useEffect(() => {
@@ -432,23 +445,35 @@ export default function HomeScreen() {
   const toggleContactSelection = (contact) => {
     const isSelected = selectedContacts.some(c => c.id === contact.id);
     
+    let newSelectedContacts;
     if (isSelected) {
       // Remove contact
-      setSelectedContacts(selectedContacts.filter(c => c.id !== contact.id));
+      newSelectedContacts = selectedContacts.filter(c => c.id !== contact.id);
+      setSelectedContacts(newSelectedContacts);
     } else {
       // Add contact (limit to 5)
       if (selectedContacts.length < 5) {
-        setSelectedContacts([...selectedContacts, contact]);
+        newSelectedContacts = [...selectedContacts, contact];
+        setSelectedContacts(newSelectedContacts);
       } else {
         Alert.alert(
           "Maximum Contacts Reached",
-          "You can select up to 5 trusted contacts. Please remove one before adding another."
+          "You can only select up to 5 emergency contacts.",
+          [{ text: "OK" }]
         );
+        return;
       }
+    }
+    
+    // Save the updated contacts to storage
+    try {
+      AsyncStorage.setItem(CONTACTS_STORAGE_KEY, JSON.stringify(newSelectedContacts));
+    } catch (error) {
+      console.error('Failed to save contacts after toggle:', error);
     }
   };
 
-  const saveContacts = () => {
+  const saveContacts = async () => {
     if (selectedContacts.length === 0) {
       Alert.alert(
         "No Contacts Selected",
@@ -458,8 +483,31 @@ export default function HomeScreen() {
       return;
     }
     
-    setShowContactModal(false);
-    setHasShownContactsPrompt(true); // Mark that the user has interacted with the prompt
+    try {
+      // Save contacts to AsyncStorage
+      await AsyncStorage.setItem(
+        CONTACTS_STORAGE_KEY, 
+        JSON.stringify(selectedContacts)
+      );
+      console.log('Saved contacts to storage:', selectedContacts.length);
+      
+      setShowContactModal(false);
+      setHasShownContactsPrompt(true); // Mark that the user has interacted with the prompt
+      
+      // Show success message
+      Alert.alert(
+        "Contacts Saved",
+        "Your emergency contacts have been saved.",
+        [{ text: "OK" }]
+      );
+    } catch (error) {
+      console.error('Failed to save contacts:', error);
+      Alert.alert(
+        "Error",
+        "Failed to save contacts. Please try again.",
+        [{ text: "OK" }]
+      );
+    }
   };
 
   const renderContactItem = ({ item }) => {
@@ -501,141 +549,365 @@ export default function HomeScreen() {
     );
   };
 
-  // Improved SOS handler with location fix and battery info
-  const handleSOS = async () => {
+  // Fix the Audio recording implementation
+  useEffect(() => {
+    // Request audio recording permissions
+    (async () => {
+      try {
+        const { status } = await Audio.requestPermissionsAsync();
+        setAudioPermission(status === 'granted');
+      } catch (err) {
+        console.log('Error requesting audio permission:', err);
+      }
+    })();
+  }, []);
+
+  const startRecording = async () => {
+    try {
+      // Check if permission is granted
+      if (audioPermission !== true) {
+        console.log('Requesting permissions..');
+        const { status } = await Audio.requestPermissionsAsync();
+        if (status !== 'granted') {
+          Alert.alert('Permission Denied', 'Audio recording requires microphone permission');
+          return false;
+        }
+        setAudioPermission(true);
+      }
+      
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+      
+      // Create a unique filename with timestamp
+      const fileName = `sos_recording_${new Date().toISOString().replace(/[:.]/g, '-')}.m4a`;
+      const fileUri = AUDIO_DIRECTORY + fileName;
+      
+      console.log('Starting recording to:', fileUri);
+      const { recording } = await Audio.Recording.createAsync(
+        Audio.RecordingOptionsPresets.HIGH_QUALITY
+      );
+      
+      setRecording(recording);
+      setRecordingStatus('recording');
+      
+      // For UI feedback
+      Alert.alert(
+        "Recording Audio",
+        "Emergency audio recording has started. Press Stop Recording when you're done.",
+        [
+          {
+            text: "Stop Recording",
+            onPress: () => stopRecording(),
+            style: "cancel"
+          }
+        ]
+      );
+      
+      return true;
+    } catch (err) {
+      console.error('Failed to start recording', err);
+      Alert.alert('Recording Failed', 'Could not start audio recording');
+      return false;
+    }
+  };
+
+  const stopRecording = async () => {
+    if (!recording) {
+      console.log('No active recording to stop');
+      return null;
+    }
+    
+    try {
+      console.log('Stopping recording..');
+      setRecordingStatus('stopped');
+      
+        await recording.stopAndUnloadAsync();
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+      });
+      
+      const uri = recording.getURI();
+      setRecording(null);
+      
+      if (!uri) {
+        console.log('No URI from recording');
+        return null;
+      }
+
+      // Create a unique filename with timestamp
+      const fileName = `sos_recording_${new Date().toISOString().replace(/[:.]/g, '-')}.m4a`;
+      const destinationUri = AUDIO_DIRECTORY + fileName;
+      
+      // Copy the temporary recording file to our app's documents directory
+      try {
+        await FileSystem.copyAsync({
+          from: uri,
+          to: destinationUri
+        });
+        
+        console.log('Recording saved permanently to:', destinationUri);
+        setRecordedURI(destinationUri);
+
+        // Show the user options for the recording
+        Alert.alert(
+          "Recording Saved",
+          "Your emergency audio recording has been saved to your device.",
+          [
+            {
+              text: "Delete",
+              onPress: async () => {
+                try {
+                  await FileSystem.deleteAsync(destinationUri);
+                  setRecordedURI(null);
+                  console.log('Deleted recording:', destinationUri);
+                } catch (err) {
+                  console.error('Failed to delete recording', err);
+                }
+              },
+              style: "destructive"
+            },
+            {
+              text: "Keep",
+              style: "cancel"
+            },
+            {
+              text: "Share",
+              onPress: () => shareRecording(destinationUri)
+            }
+          ]
+        );
+        
+        return destinationUri;
+      } catch (copyError) {
+        console.error('Failed to save recording to permanent storage:', copyError);
+        // Fall back to using the original URI
+        setRecordedURI(uri);
+        
+        Alert.alert(
+          "Recording Available",
+          "Your recording is available temporarily.",
+          [
+            {
+              text: "Share",
+              onPress: () => shareRecording(uri)
+            },
+            {
+              text: "OK",
+              style: "cancel"
+            }
+          ]
+        );
+        
+        return uri;
+      }
+    } catch (err) {
+      console.error('Failed to stop recording', err);
+      Alert.alert('Error', 'Failed to stop recording');
+      return null;
+    }
+  };
+
+  const shareRecording = async (uri: string) => {
+    try {
+      await shareAsync(uri, {
+        mimeType: 'audio/m4a',
+        dialogTitle: 'Share Emergency Recording',
+      });
+    } catch (err) {
+      console.error('Failed to share recording', err);
+      Alert.alert('Error', 'Failed to share recording');
+    }
+  };
+
+  // Now modify the handleSOS function to include the audio recording option
+  const handleSOS = async (options = {}) => {
     try {
       // Immediately vibrate phone for user feedback
       Vibration.vibrate([500, 200, 500, 200, 500]);
       
-      // Show immediate feedback to the user WITH a cancel button
-      Alert.alert(
-        "SOS Alert",
-        "Sending emergency messages...",
-        [
-          {
-            text: "Cancel",
-            onPress: () => console.log("SOS cancelled by user"),
-            style: "cancel"
-          }
-        ],
-        { cancelable: true } // Make alert cancellable
-      );
+      const { showAudioRecordPrompt = false } = options;
       
-      // Use last known location if available, otherwise try to get current location
-      let currentLocation = lastKnownLocation;
+      let shouldSendSMS = true;
+      let shouldRecordAudio = false;
       
-      // If no cached location, try to get current location with a timeout
-      if (!currentLocation) {
-        try {
-          console.log("No cached location, getting current location");
-          // Set a short timeout for getting location to avoid long delays
-          const locationPromise = Location.getCurrentPositionAsync({
-            accuracy: Location.Accuracy.Balanced // Use balanced accuracy for speed
-          });
-          
-          // Set a timeout to ensure we don't wait too long
-          const timeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('Location timeout')), 3000)
+      if (showAudioRecordPrompt) {
+        // Ask the user if they want to record audio along with sending SOS
+        const userChoice = await new Promise((resolve) => {
+          Alert.alert(
+            "SOS Emergency",
+            "Do you want to send emergency SMS and record audio?",
+            [
+              {
+                text: "Cancel",
+                onPress: () => resolve({ sms: false, audio: false }),
+                style: "cancel"
+              },
+              {
+                text: "SMS Only",
+                onPress: () => resolve({ sms: true, audio: false })
+              },
+              {
+                text: "SMS + Record Audio",
+                onPress: () => resolve({ sms: true, audio: true })
+              }
+            ],
+            { cancelable: true }
           );
-          
-          // Race between getting location and timeout
-          currentLocation = await Promise.race([locationPromise, timeoutPromise]);
-        } catch (error) {
-          console.warn("Location acquisition failed:", error);
-          
-          // Last resort - try to get last known location from device
-          try {
-            console.log("Trying to get last known location from device");
-            currentLocation = await Location.getLastKnownPositionAsync();
-          } catch (lastLocationError) {
-            console.error("Failed to get last known location:", lastLocationError);
-          }
-        }
-      }
-      
-      // Prepare the message with battery info and location if available
-      let message = `EMERGENCY: I need help! Battery: ${batteryLevel}%${isCharging ? ' (Charging)' : ''}`;
-      
-      if (currentLocation && currentLocation.coords) {
-        // Format the coordinates to 6 decimal places for accuracy
-        const lat = currentLocation.coords.latitude.toFixed(6);
-        const lng = currentLocation.coords.longitude.toFixed(6);
-        message += `\n\nMy current location is: https://maps.google.com/?q=${lat},${lng}`;
-        
-        // Add additional information that might be helpful
-        if (currentLocation.coords.accuracy) {
-          message += `\nLocation accuracy: ~${Math.round(currentLocation.coords.accuracy)}m`;
-        }
-        
-        // Add timestamp of when location was acquired
-        const timestamp = currentLocation.timestamp
-          ? new Date(currentLocation.timestamp).toLocaleTimeString()
-          : new Date().toLocaleTimeString();
-        message += `\nTime: ${timestamp}`;
-      } else {
-        message += "\n\nLocation unavailable. Please call me for more information.";
-      }
-      
-      console.log("SOS message:", message);
-      
-      // Send SMS to emergency contacts directly from device
-      if (selectedContacts.length > 0) {
-        // Extract phone numbers from contacts
-        const phoneNumbers = [];
-        selectedContacts.forEach(contact => {
-          if (contact.phoneNumbers && contact.phoneNumbers.length > 0) {
-            phoneNumbers.push(contact.phoneNumbers[0].number);
-          }
         });
         
-        if (phoneNumbers.length > 0) {
+        shouldSendSMS = userChoice.sms;
+        shouldRecordAudio = userChoice.audio;
+        
+        if (!shouldSendSMS && !shouldRecordAudio) {
+          console.log("SOS cancelled by user");
+          return;
+        }
+      }
+      
+      // Start audio recording if requested
+      if (shouldRecordAudio) {
+        const started = await startRecording();
+        if (!started && !shouldSendSMS) {
+          return; // If only recording was requested but it failed, exit
+        }
+      }
+      
+      // Send SMS if requested
+      if (shouldSendSMS) {
+        // Show feedback that SMS is being sent
+        if (!shouldRecordAudio) {
+          Alert.alert(
+            "SOS Alert",
+            "Sending emergency messages...",
+            [
+              {
+                text: "Cancel",
+                onPress: () => console.log("SOS SMS cancelled by user"),
+                style: "cancel"
+              }
+            ],
+            { cancelable: true }
+          );
+        }
+        
+        // Use last known location if available, otherwise try to get current location
+        let currentLocation = lastKnownLocation;
+        
+        // If no cached location, try to get current location with a timeout
+        if (!currentLocation) {
           try {
-            // Use our custom SMS module with a shorter timeout
-            console.log("Sending SMS to:", phoneNumbers);
-            SMS.sendSMSAsync(phoneNumbers, message)
-              .then(({ result }) => {
-                console.log("SMS result:", result);
-                
-                // Show success message after SMS is sent
-                Alert.alert(
-                  "SOS Alert Sent",
-                  "Your emergency contacts have been notified." +
-                  (currentLocation && currentLocation.coords ? "" : " However, your location couldn't be included."),
-                  [{ text: "OK" }]
-                );
-              })
-              .catch(error => {
-                console.error("SMS sending error:", error);
-                Alert.alert(
-                  "SMS Sending Issue",
-                  "There was a problem sending SMS. Please try calling emergency services directly.",
-                  [{ text: "OK" }]
-                );
-              });
-          } catch (smsError) {
-            console.error("SMS error:", smsError);
-            Alert.alert(
-              "SMS Error",
-              "Could not send SMS. Please call emergency services directly.",
-              [{ text: "OK" }]
+            console.log("No cached location, getting current location");
+            // Set a short timeout for getting location to avoid long delays
+            const locationPromise = Location.getCurrentPositionAsync({
+              accuracy: Location.Accuracy.Balanced // Use balanced accuracy for speed
+            });
+            
+            // Set a timeout to ensure we don't wait too long
+            const timeoutPromise = new Promise((_, reject) => 
+              setTimeout(() => reject(new Error('Location timeout')), 3000)
             );
+            
+            // Race between getting location and timeout
+            currentLocation = await Promise.race([locationPromise, timeoutPromise]);
+          } catch (error) {
+            console.warn("Location acquisition failed:", error);
+            
+            // Last resort - try to get last known location from device
+            try {
+              console.log("Trying to get last known location from device");
+              currentLocation = await Location.getLastKnownPositionAsync();
+            } catch (lastLocationError) {
+              console.error("Failed to get last known location:", lastLocationError);
+            }
           }
         }
-      } else {
-        Alert.alert(
-          "No Emergency Contacts",
-          "You haven't selected any emergency contacts. Please add trusted contacts to use the SOS feature.",
-          [
-            { text: "Cancel", style: "cancel" },
-            { text: "Add Contacts", onPress: () => setShowContactModal(true) }
-          ]
-        );
+        
+        // Prepare the message with battery info and location if available
+        let message = `EMERGENCY: I need help! Battery: ${batteryLevel}%${isCharging ? ' (Charging)' : ''}`;
+        
+        if (currentLocation && currentLocation.coords) {
+          // Format the coordinates to 6 decimal places for accuracy
+          const lat = currentLocation.coords.latitude.toFixed(6);
+          const lng = currentLocation.coords.longitude.toFixed(6);
+          message += `\n\nMy current location is: https://maps.google.com/?q=${lat},${lng}`;
+          
+          // Add additional information that might be helpful
+          if (currentLocation.coords.accuracy) {
+            message += `\nLocation accuracy: ~${Math.round(currentLocation.coords.accuracy)}m`;
+          }
+          
+          // Add timestamp of when location was acquired
+          const timestamp = currentLocation.timestamp
+            ? new Date(currentLocation.timestamp).toLocaleTimeString()
+            : new Date().toLocaleTimeString();
+          message += `\nTime: ${timestamp}`;
+        } else {
+          message += "\n\nLocation unavailable. Please call me for more information.";
+        }
+        
+        console.log("SOS message:", message);
+        
+        // Send SMS to emergency contacts directly from device
+        if (selectedContacts.length > 0) {
+          // Extract phone numbers from contacts
+          const phoneNumbers = [];
+          selectedContacts.forEach(contact => {
+            if (contact.phoneNumbers && contact.phoneNumbers.length > 0) {
+              phoneNumbers.push(contact.phoneNumbers[0].number);
+            }
+          });
+          
+          if (phoneNumbers.length > 0) {
+            try {
+              // Use our custom SMS module with a shorter timeout
+              console.log("Sending SMS to:", phoneNumbers);
+              SMS.sendSMSAsync(phoneNumbers, message)
+                .then(({ result }) => {
+                  console.log("SMS result:", result);
+                  
+                  // Show success message after SMS is sent
+                  Alert.alert(
+                    "SOS Alert Sent",
+                    "Your emergency contacts have been notified." +
+                    (currentLocation && currentLocation.coords ? "" : " However, your location couldn't be included."),
+                    [{ text: "OK" }]
+                  );
+                })
+                .catch(error => {
+                  console.error("SMS sending error:", error);
+                  Alert.alert(
+                    "SMS Sending Issue",
+                    "There was a problem sending SMS. Please try calling emergency services directly.",
+                    [{ text: "OK" }]
+                  );
+                });
+            } catch (smsError) {
+              console.error("SMS error:", smsError);
+              Alert.alert(
+                "SMS Error",
+                "Could not send SMS. Please call emergency services directly.",
+                [{ text: "OK" }]
+              );
+            }
+          }
+        } else {
+          Alert.alert(
+            "No Emergency Contacts",
+            "You haven't selected any emergency contacts. Please add trusted contacts to use the SOS feature.",
+            [
+              { text: "Cancel", style: "cancel" },
+              { text: "Add Contacts", onPress: () => setShowContactModal(true) }
+            ]
+          );
+        }
       }
     } catch (error) {
       console.error("SOS error:", error);
       Alert.alert(
         "SOS Error",
-        "There was an error sending your SOS alert. Please try calling emergency services directly.",
+        "There was an error processing your SOS alert. Please try calling emergency services directly.",
         [{ text: "OK" }]
       );
     }
@@ -894,6 +1166,42 @@ export default function HomeScreen() {
     );
   };
 
+  // After the existing contacts useEffect, add this useEffect to ensure the audio directory exists
+  useEffect(() => {
+    // Create audio recordings directory if it doesn't exist
+    (async () => {
+      try {
+        const dirInfo = await FileSystem.getInfoAsync(AUDIO_DIRECTORY);
+        if (!dirInfo.exists) {
+          await FileSystem.makeDirectoryAsync(AUDIO_DIRECTORY, { intermediates: true });
+          console.log('Created audio recordings directory at:', AUDIO_DIRECTORY);
+        }
+      } catch (error) {
+        console.error('Failed to create audio directory:', error);
+      }
+    })();
+  }, []);
+
+  // Add this after the existing contacts useEffect
+  useEffect(() => {
+    // Load saved contacts when component mounts
+    loadSavedContacts();
+  }, []);
+
+  // Add these new functions for contact persistence
+  const loadSavedContacts = async () => {
+    try {
+      const savedContactsJson = await AsyncStorage.getItem(CONTACTS_STORAGE_KEY);
+      if (savedContactsJson !== null) {
+        const savedContacts = JSON.parse(savedContactsJson);
+        console.log('Loaded saved contacts:', savedContacts.length);
+        setSelectedContacts(savedContacts);
+      }
+    } catch (error) {
+      console.error('Failed to load saved contacts:', error);
+    }
+  };
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.container}>
@@ -1006,76 +1314,8 @@ export default function HomeScreen() {
           {/* Add any additional content here */}
         </ScrollView>
         
-        {/* Bottom navigation stays the same */}
-        <View style={styles.bottomNav}>
-          <TouchableOpacity 
-            style={styles.navItem}
-            onPress={() => router.replace('/home')}
-          >
-            <Ionicons 
-              name="home-outline" 
-              size={24} 
-              color={pathname === '/home' ? '#FF6B9C' : '#999'} 
-            />
-            <Text style={[styles.navText, pathname === '/home' && styles.activeNavText]}>Home</Text>
-          </TouchableOpacity>
-          
-          <TouchableOpacity 
-            style={styles.navItem}
-            onPress={() => router.push('/social')}
-          >
-            <Ionicons 
-              name="people-outline" 
-              size={24} 
-              color={pathname === '/social' ? '#FF6B9C' : '#999'} 
-            />
-            <Text style={[styles.navText, pathname === '/social' && styles.activeNavText]}>Social</Text>
-          </TouchableOpacity>
-          
-          <View style={styles.sosButton}>
-            <TouchableOpacity 
-              onPress={handleSOS}
-              activeOpacity={0.8}
-            >
-              <LinearGradient
-                colors={['#FF6B9C', '#F24976']}
-                style={styles.sosButtonGradient}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
-              >
-                <Ionicons name="alert" size={32} color="#fff" />
-              </LinearGradient>
-            </TouchableOpacity>
-            <Text style={styles.sosText}>SOS</Text>
-          </View>
-          
-          <TouchableOpacity 
-            style={styles.navItem}
-            onPress={() => router.push('/helpline')}
-          >
-            <Ionicons 
-              name="call-outline" 
-              size={24} 
-              color={pathname === '/helpline' ? '#FF6B9C' : '#999'} 
-            />
-            <Text style={[styles.navText, pathname === '/helpline' && styles.activeNavText]}>Helpline</Text>
-          </TouchableOpacity>
-          
-          <TouchableOpacity 
-            style={styles.navItem}
-            onPress={() => router.push('/quicktips')}
-          >
-            <Ionicons 
-              name="information-circle-outline" 
-              size={24} 
-              color={pathname === '/quicktips' ? '#FF6B9C' : '#999'} 
-            />
-            <Text style={[styles.navText, pathname === '/quicktips' && styles.activeNavText]}>Tips</Text>
-          </TouchableOpacity>
-        </View>
-        
-        {/* Add the floating chatbot */}
-        <FloatingChatbot />
+        {/* Use the consistent BottomNav component */}
+        <BottomNav onSOS={handleSOS} />
       </View>
       
       {/* Contact Selection Modal */}
