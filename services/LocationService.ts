@@ -23,7 +23,7 @@ const LocationService = {
    */
   updateLocation: async (location: Location): Promise<UpdateLocationResponse> => {
     try {
-      return await apiClient.post<UpdateLocationResponse>('/users/location', { location });
+      return await apiClient.post<UpdateLocationResponse>('/api/v1/users/location', { location });
     } catch (error) {
       console.error('Error updating location:', error);
       throw error;
@@ -35,7 +35,7 @@ const LocationService = {
    */
   triggerSOS: async (location: Location): Promise<UpdateLocationResponse> => {
     try {
-      return await apiClient.post<UpdateLocationResponse>('/alerts/sos', { 
+      return await apiClient.post<UpdateLocationResponse>('/api/v1/alerts/sos', { 
         location,
         message: 'I need help! This is my current location.'
       });
@@ -50,7 +50,7 @@ const LocationService = {
    */
   endSOS: async (): Promise<UpdateLocationResponse> => {
     try {
-      return await apiClient.post<UpdateLocationResponse>('/alerts/sos/end', {});
+      return await apiClient.post<UpdateLocationResponse>('/api/v1/alerts/sos/end', {});
     } catch (error) {
       console.error('Error ending SOS:', error);
       throw error;
@@ -65,7 +65,7 @@ const LocationService = {
     description: string
   ): Promise<UpdateLocationResponse> => {
     try {
-      return await apiClient.post<UpdateLocationResponse>('/alerts/unsafe', {
+      return await apiClient.post<UpdateLocationResponse>('/api/v1/alerts/unsafe', {
         location,
         description
       });

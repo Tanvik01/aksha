@@ -1,4 +1,7 @@
-import { Image, StyleSheet, Platform } from 'react-native';
+import { Image, StyleSheet, Platform, Vibration, Alert, Toast } from 'react-native';
+import * as Location from 'expo-location';
+import * as SMS from 'expo-sms';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { HelloWave } from '@/components/HelloWave';
 import ParallaxScrollView from '@/components/ParallaxScrollView';
@@ -6,6 +9,100 @@ import { ThemedText } from '@/components/ThemedText';
 import { ThemedView } from '@/components/ThemedView';
 
 export default function HomeScreen() {
+  const handleEmergencyHelp = async () => {
+    // Vibrate in an SOS pattern
+    Vibration.vibrate([500, 200, 500, 200, 500]);
+    
+    // Show emergency alert
+    Alert.alert(
+      "Emergency Mode Activated",
+      "If you're in immediate danger, please call emergency services directly. Your emergency contacts will be notified with your current location.",
+      [
+        { text: "Cancel", style: "cancel" },
+        { 
+          text: "Confirm Emergency", 
+          style: "destructive",
+          onPress: async () => {
+            await sendEmergencyLocationSMS();
+          }
+        }
+      ]
+    );
+  };
+
+  const sendEmergencyLocationSMS = async () => {
+    try {
+      // Get saved emergency contact
+      const emergencyContact = await AsyncStorage.getItem('emergencyContact');
+      if (!emergencyContact) {
+        Toast.show({
+          type: 'error',
+          text1: 'No emergency contact found',
+          text2: 'Please set up an emergency contact in settings',
+        });
+        return;
+      }
+
+      // Get current location
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        Toast.show({
+          type: 'error',
+          text1: 'Location permission denied',
+          text2: 'We need location access to send your position',
+        });
+        return;
+      }
+
+      const location = await Location.getCurrentPositionAsync({});
+      const { latitude, longitude } = location.coords;
+      
+      // Create Google Maps link with location
+      const googleMapsLink = `https://www.google.com/maps?q=${latitude},${longitude}`;
+      
+      // Prepare message
+      const message = `EMERGENCY ALERT: I need help! My current location is: ${googleMapsLink}`;
+      
+      // Check if SMS is available
+      const isAvailable = await SMS.isAvailableAsync();
+      if (!isAvailable) {
+        Toast.show({
+          type: 'error',
+          text1: 'SMS not available',
+          text2: 'SMS functionality is not available on this device',
+        });
+        return;
+      }
+      
+      // Send SMS
+      const { result } = await SMS.sendSMSAsync(
+        [emergencyContact],
+        message
+      );
+      
+      if (result === 'sent' || result === 'unknown') {
+        Toast.show({
+          type: 'success',
+          text1: 'Emergency Alert Sent',
+          text2: 'Your location has been shared with your emergency contact',
+        });
+      } else {
+        Toast.show({
+          type: 'error',
+          text1: 'Failed to send message',
+          text2: 'Please try again or call emergency services directly',
+        });
+      }
+    } catch (error) {
+      console.error('Error sending emergency SMS:', error);
+      Toast.show({
+        type: 'error',
+        text1: 'Error sending emergency alert',
+        text2: 'Please call emergency services directly',
+      });
+    }
+  };
+
   return (
     <ParallaxScrollView
       headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}

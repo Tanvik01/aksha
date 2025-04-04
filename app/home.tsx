@@ -460,7 +460,8 @@ export default function HomeScreen() {
   // Handle SOS button press
   const handleSOS = async () => {
     try {
-      Vibration.vibrate(500);
+      // Vibrate phone with SOS pattern
+      Vibration.vibrate([500, 200, 500, 200, 500]);
       
       // Get current location
       let currentLocation: Location.LocationObject | null = null;
@@ -474,23 +475,9 @@ export default function HomeScreen() {
         return;
       }
       
-      // Format location for our API
-      const locationData: LocationType = {
-        coordinates: [
-          currentLocation.coords.longitude, 
-          currentLocation.coords.latitude
-        ],
-        accuracy: currentLocation.coords.accuracy || undefined,
-        altitude: currentLocation.coords.altitude || undefined,
-        heading: currentLocation.coords.heading || undefined,
-        speed: currentLocation.coords.speed || undefined,
-        timestamp: currentLocation.timestamp
-      };
+      // Skip backend API call and handle everything on device
       
-      // Trigger SOS with backend
-      await LocationService.triggerSOS(locationData);
-      
-      // Send SMS to emergency contacts directly from device as a fallback
+      // Send SMS to emergency contacts directly from device
       if (selectedContacts.length > 0) {
         const message = `EMERGENCY: I need help! My current location is: https://maps.google.com/?q=${currentLocation.coords.latitude},${currentLocation.coords.longitude}`;
         
@@ -509,6 +496,12 @@ export default function HomeScreen() {
         } catch (smsError) {
           console.error("SMS error:", smsError);
         }
+      } else {
+        Alert.alert(
+          "No Emergency Contacts",
+          "You haven't selected any emergency contacts. Please add trusted contacts to use the SOS feature."
+        );
+        return;
       }
       
       // Show alert to user

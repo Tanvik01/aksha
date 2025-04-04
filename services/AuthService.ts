@@ -41,7 +41,7 @@ const AuthService = {
       if (sessionToken) loginPayload.sessionToken = sessionToken;
       
       // Send enhanced login request with session info
-      const response = await apiClient.post<LoginResponse>('/auth/login', loginPayload);
+      const response = await apiClient.post<LoginResponse>('/api/v1/auth/login', loginPayload);
       
       console.log('Login response received from backend');
       
@@ -114,7 +114,7 @@ const AuthService = {
    */
   getProfile: async (): Promise<User> => {
     try {
-      const response = await apiClient.get<User>('/users/profile');
+      const response = await apiClient.get<User>('/api/v1/users/profile');
       return response;
     } catch (error) {
       console.error('Error getting profile:', error);

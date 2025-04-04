@@ -29,9 +29,16 @@ const ChatService = {
    */
   sendMessage: async (messages: ChatMessage[], model?: string): Promise<ChatResponse> => {
     try {
-      // Call the AI chat endpoint
-      const result = await apiClient.post<ChatResponse>('/ai/chat', {
-        messages,
+      // Find the last user message to use as prompt if needed
+      const lastUserMessage = [...messages].reverse().find(msg => msg.role === 'user');
+      
+      if (!lastUserMessage) {
+        throw new Error('No user message found in chat history');
+      }
+      
+      // Call the AI chat endpoint with the prompt approach (more reliable)
+      const result = await apiClient.post<ChatResponse>('/api/ai/chat', {
+        prompt: lastUserMessage.content,
         model: model || 'gemma3'  // Use Gemma3 as default model
       });
       
@@ -49,7 +56,7 @@ const ChatService = {
    */
   getEmergencyHelp: async (situation: string, location?: string): Promise<EmergencyResponse> => {
     try {
-      const result = await apiClient.post<EmergencyResponse>('/ai/emergency', {
+      const result = await apiClient.post<EmergencyResponse>('/api/ai/emergency', {
         situation,
         location
       });
@@ -66,7 +73,7 @@ const ChatService = {
    */
   getModels: async (): Promise<string[]> => {
     try {
-      const result = await apiClient.get<ModelsResponse>('/ai/models');
+      const result = await apiClient.get<ModelsResponse>('/api/ai/models');
       return result.models || [];
     } catch (error) {
       console.error('Error getting AI models:', error);

@@ -11,315 +11,254 @@ import {
   Animated,
   KeyboardAvoidingView,
   Platform,
-  Keyboard
+  Keyboard,
+  Alert
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import ChatService, { ChatMessage } from '../services/ChatService';
-
-// Fallback direct connection to Ollama API
-const OLLAMA_API_URL = 'http://localhost:11434';
-const DEFAULT_MODEL = 'gemma3';
-
-// Direct Ollama API fallback when backend fails
-const chatWithOllamaDirect = async (messages: ChatMessage[]): Promise<ChatMessage | null> => {
-  try {
-    // Format messages for Ollama API
-    const formattedMessages = messages.map(msg => ({
-      role: msg.role,
-      content: msg.content
-    }));
-    
-    // Add system message if not present
-    if (!formattedMessages.find(m => m.role === 'system')) {
-      formattedMessages.unshift({
-        role: 'system',
-        content: 'You are Aksha AI Assistant, an AI helper integrated with the Aksha safety app. Your purpose is to provide detailed, practical information about personal safety, using the app features, and offering step-by-step guidance during emergencies. Be concise but thorough in your responses. Always prioritize user safety and well-being in your advice.'
-      });
-    }
-    
-    // Make direct request to Ollama
-    const response = await fetch(`${OLLAMA_API_URL}/api/chat`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: DEFAULT_MODEL,
-        messages: formattedMessages,
-        stream: false,
-        options: { temperature: 0.5 }
-      })
-    });
-    
-    if (!response.ok) {
-      throw new Error(`Ollama API error: ${response.status}`);
-    }
-    
-    const data = await response.json();
-    
-    return {
-      role: 'assistant',
-      content: data.message?.content || 'Sorry, I couldn\'t generate a response.',
-      timestamp: new Date()
-    };
-  } catch (error) {
-    console.error('Error directly connecting to Ollama:', error);
-    return null;
-  }
-};
+import { useAppAuth } from '../context/AuthContext';
 
 const FloatingChatbot = () => {
-  const [isModalVisible, setIsModalVisible] = useState(false);
-  const [inputMessage, setInputMessage] = useState('');
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [useDirectOllama, setUseDirectOllama] = useState(false);
+  // Get auth context to check if user is logged in
+  const { isSignedIn, backendUser } = useAppAuth();
   
-  const modalScale = useRef(new Animated.Value(0)).current;
-  const buttonScale = useRef(new Animated.Value(1)).current;
-  const flatListRef = useRef<FlatList>(null);
-
-  // Initialize with a welcome message
-  useEffect(() => {
-    const welcomeMessage: ChatMessage = {
+  // State for the chat interface
+  const [isModalVisible, setModalVisible] = useState(false);
+  const [inputMessage, setInputMessage] = useState('');
+  const [messages, setMessages] = useState<ChatMessage[]>([
+    {
       role: 'assistant',
-      content: 'Hi! I\'m Aksha AI, your personal safety assistant. How can I help you today?',
+      content: 'Hello! I am Aksha AI Assistant. How can I help you with personal safety today?',
       timestamp: new Date()
+    }
+  ]);
+  const [isTyping, setIsTyping] = useState(false);
+  
+  // Animation for the bubble
+  const scaleAnim = useRef(new Animated.Value(1)).current;
+  const flatListRef = useRef<FlatList>(null);
+  
+  // Test backend AI connectivity on component mount, but only when authenticated
+  useEffect(() => {
+    const testAIConnection = async () => {
+      // Skip if not signed in
+      if (!isSignedIn || !backendUser) {
+        console.log('Skipping AI connection test - user not authenticated');
+        return;
+      }
+      
+      try {
+        const models = await ChatService.getModels();
+        console.log('AI connection successful, available models:', models);
+      } catch (error) {
+        console.error('Error testing AI connection:', error);
+      }
     };
     
-    setMessages([welcomeMessage]);
-  }, []);
-
-  // Auto scroll to bottom when new messages arrive
+    testAIConnection();
+  }, [isSignedIn, backendUser]);
+  
+  // Handle animations
   useEffect(() => {
-    if (messages.length > 1) {
+    const pulseAnimation = Animated.sequence([
+      Animated.timing(scaleAnim, {
+        toValue: 1.1,
+        duration: 300,
+        useNativeDriver: true,
+      }),
+      Animated.timing(scaleAnim, {
+        toValue: 1,
+        duration: 300,
+        useNativeDriver: true,
+      }),
+    ]);
+    
+    // Pulse animation every 3 seconds when modal is closed
+    const intervalId = setInterval(() => {
+      if (!isModalVisible) {
+        pulseAnimation.start();
+      }
+    }, 3000);
+    
+    return () => clearInterval(intervalId);
+  }, [isModalVisible, scaleAnim]);
+  
+  // Toggle the chat modal
+  const toggleModal = () => {
+    // If not signed in, show a message
+    if (!isSignedIn || !backendUser) {
+      Alert.alert(
+        "Authentication Required",
+        "Please sign in to use the AI assistant.",
+        [{ text: "OK" }]
+      );
+      return;
+    }
+    
+    if (!isModalVisible) {
+      // Opening the modal
+      setModalVisible(true);
+    } else {
+      // Closing the modal
+      setModalVisible(false);
+    }
+  };
+  
+  // Scroll to bottom of chat when new messages arrive
+  useEffect(() => {
+    if (messages.length > 0 && flatListRef.current) {
       setTimeout(() => {
         flatListRef.current?.scrollToEnd({ animated: true });
       }, 100);
     }
   }, [messages]);
-
-  const toggleModal = () => {
-    if (!isModalVisible) {
-      setIsModalVisible(true);
-      Animated.parallel([
-        Animated.timing(modalScale, {
-          toValue: 1,
-          duration: 300,
-          useNativeDriver: true,
-        }),
-        Animated.timing(buttonScale, {
-          toValue: 0,
-          duration: 200,
-          useNativeDriver: true,
-        })
-      ]).start();
-    } else {
-      Animated.parallel([
-        Animated.timing(modalScale, {
-          toValue: 0,
-          duration: 300,
-          useNativeDriver: true,
-        }),
-        Animated.timing(buttonScale, {
-          toValue: 1,
-          duration: 300,
-          useNativeDriver: true,
-        })
-      ]).start(() => {
-        setIsModalVisible(false);
-      });
-    }
-  };
-
+  
+  // Send message handler
   const handleSendMessage = async () => {
     if (!inputMessage.trim()) return;
-
+    if (!isSignedIn || !backendUser) {
+      Alert.alert("Authentication Required", "Please sign in to use the AI assistant.");
+      return;
+    }
+    
+    // Add user message to chat
     const userMessage: ChatMessage = {
       role: 'user',
       content: inputMessage.trim(),
       timestamp: new Date()
     };
-
-    // Update UI immediately
+    
     setMessages(prevMessages => [...prevMessages, userMessage]);
     setInputMessage('');
-    Keyboard.dismiss();
-    setIsLoading(true);
-
+    setIsTyping(true);
+    
     try {
-      let aiMessage: ChatMessage | null = null;
+      // Prepare chat history for the API
+      const chatHistory = [...messages, userMessage];
       
-      if (useDirectOllama) {
-        // Try direct connection to Ollama
-        aiMessage = await chatWithOllamaDirect([...messages, userMessage]);
-      } else {
-        try {
-          // Try using the backend service first
-          const chatHistory = [...messages, userMessage];
-          const response = await ChatService.sendMessage(chatHistory);
-          
-          if (response && response.messages) {
-            const lastAssistantMessage = response.messages.find(msg => msg.role === 'assistant');
-            
-            if (lastAssistantMessage) {
-              aiMessage = {
-                role: 'assistant',
-                content: lastAssistantMessage.content,
-                timestamp: new Date()
-              };
-            }
+      // Call the backend API through our service
+      const response = await ChatService.sendMessage(chatHistory);
+      
+      if (response && response.response) {
+        setMessages(prevMessages => [
+          ...prevMessages, 
+          {
+            role: 'assistant',
+            content: response.response,
+            timestamp: new Date()
           }
-        } catch (error) {
-          console.error('Backend service failed, trying direct Ollama:', error);
-          // If backend service fails, switch to direct Ollama for future messages
-          setUseDirectOllama(true);
-          // Try direct connection as fallback
-          aiMessage = await chatWithOllamaDirect([...messages, userMessage]);
-        }
-      }
-      
-      // If we have a response, add it
-      if (aiMessage) {
-        setMessages(prevMessages => [...prevMessages, aiMessage!]);
-      } else {
-        // Fallback error message
-        const errorMessage: ChatMessage = {
-          role: 'assistant',
-          content: 'Sorry, I encountered an error. Please try again or check if Ollama is running properly on your system.',
-          timestamp: new Date()
-        };
-        setMessages(prevMessages => [...prevMessages, errorMessage]);
+        ]);
       }
     } catch (error) {
-      console.error('Failed to get AI response:', error);
+      console.error('Error in chat:', error);
       
       // Add error message
-      const errorMessage: ChatMessage = {
-        role: 'assistant',
-        content: 'Sorry, I encountered an error. Please make sure Ollama is running with the gemma3 model using "ollama run gemma3".',
-        timestamp: new Date()
-      };
-      setMessages(prevMessages => [...prevMessages, errorMessage]);
+      setMessages(prevMessages => [
+        ...prevMessages, 
+        {
+          role: 'assistant',
+          content: 'Sorry, I encountered an error. Please try again.',
+          timestamp: new Date()
+        }
+      ]);
     } finally {
-      setIsLoading(false);
+      setIsTyping(false);
     }
   };
-
+  
+  // Render chat message
   const renderMessageItem = ({ item, index }: { item: ChatMessage; index: number }) => {
     const isUser = item.role === 'user';
+    const showTimestamp = index === 0 || 
+      (index > 0 && new Date(item.timestamp!).getTime() - new Date(messages[index - 1].timestamp!).getTime() > 60000);
     
     return (
-      <View style={[
-        styles.messageContainer,
-        isUser ? styles.userMessageContainer : styles.aiMessageContainer
-      ]}>
-        {!isUser && (
-          <View style={styles.avatarContainer}>
-            <LinearGradient
-              colors={['#FF6B9C', '#FF3F80']}
-              style={styles.avatarGradient}
-            >
-              <Ionicons name="shield" size={16} color="#FFF" />
-            </LinearGradient>
-          </View>
+      <View style={styles.messageContainer}>
+        {showTimestamp && item.timestamp && (
+          <Text style={styles.timestamp}>
+            {new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+          </Text>
         )}
         
         <View style={[
           styles.messageBubble,
-          isUser ? styles.userBubble : styles.aiBubble
+          isUser ? styles.userBubble : styles.assistantBubble
         ]}>
-          <Text style={[
-            styles.messageText,
-            isUser ? styles.userMessageText : styles.aiMessageText
-          ]}>
+          <Text style={styles.messageText}>
             {item.content}
           </Text>
-          
-          {item.timestamp && (
-            <Text style={styles.timestamp}>
-              {item.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-            </Text>
-          )}
         </View>
       </View>
     );
   };
-
+  
   return (
-    <>
-      {/* Floating Chat Button */}
-      <Animated.View 
-        style={[
-          styles.floatingButton,
-          { transform: [{ scale: buttonScale }] }
-        ]}
-      >
-        <TouchableOpacity
-          activeOpacity={0.8}
-          onPress={toggleModal}
+    <View style={styles.container}>
+      {/* Floating chat button */}
+      <TouchableOpacity onPress={toggleModal} activeOpacity={0.8}>
+        <Animated.View 
+          style={[
+            styles.chatButton,
+            { transform: [{ scale: scaleAnim }] }
+          ]}
         >
           <LinearGradient
-            colors={['#FF6B9C', '#FF3F80']}
-            style={styles.buttonGradient}
+            colors={['#FF6B9C', '#EE69E1']}
+            style={styles.gradient}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
           >
-            <Ionicons name="chatbubbles" size={26} color="#FFF" />
+            <Ionicons name="chatbubbles" size={28} color="white" />
           </LinearGradient>
-        </TouchableOpacity>
-      </Animated.View>
-
-      {/* Chat Modal */}
+        </Animated.View>
+      </TouchableOpacity>
+      
+      {/* Chat modal */}
       <Modal
         visible={isModalVisible}
+        animationType="slide"
         transparent={true}
-        animationType="none"
         onRequestClose={toggleModal}
       >
         <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
           style={styles.modalContainer}
         >
-          <Animated.View 
-            style={[
-              styles.modalContent,
-              { 
-                transform: [
-                  { scale: modalScale },
-                ],
-                opacity: modalScale
-              }
-            ]}
-          >
-            {/* Chat Header */}
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>
-                Chat with Aksha AI {useDirectOllama ? '(Direct)' : ''}
-              </Text>
-              <TouchableOpacity onPress={toggleModal}>
-                <Ionicons name="close-circle" size={24} color="#AAA" />
-              </TouchableOpacity>
-            </View>
-
-            {/* Chat Messages */}
+          <View style={styles.modalContent}>
+            {/* Chat header */}
+            <LinearGradient
+              colors={['#FF6B9C', '#EE69E1']}
+              style={styles.modalHeader}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+            >
+              <View style={styles.headerContent}>
+                <Text style={styles.headerTitle}>Aksha AI Assistant</Text>
+                <TouchableOpacity onPress={toggleModal} style={styles.closeButton}>
+                  <Ionicons name="close" size={24} color="white" />
+                </TouchableOpacity>
+              </View>
+            </LinearGradient>
+            
+            {/* Chat messages */}
             <FlatList
               ref={flatListRef}
               data={messages}
               renderItem={renderMessageItem}
-              keyExtractor={(item, index) => `message-${index}`}
+              keyExtractor={(_, index) => index.toString()}
               contentContainerStyle={styles.messagesContainer}
-              showsVerticalScrollIndicator={false}
             />
             
-            {/* Loading Indicator */}
-            {isLoading && (
+            {/* Typing indicator */}
+            {isTyping && (
               <View style={styles.typingIndicator}>
-                <Text style={styles.typingText}>Aksha AI is thinking</Text>
-                <ActivityIndicator size="small" color="#FF6B9C" />
+                <Text style={styles.typingText}>Aksha is typing</Text>
+                <ActivityIndicator size="small" color="#FF6B9C" style={styles.typingDots} />
               </View>
             )}
-
-            {/* Input Area */}
+            
+            {/* Input area */}
             <View style={styles.inputContainer}>
               <TextInput
                 style={styles.input}
@@ -328,195 +267,157 @@ const FloatingChatbot = () => {
                 value={inputMessage}
                 onChangeText={setInputMessage}
                 multiline
-                maxLength={500}
               />
-              
-              <TouchableOpacity
-                style={[
-                  styles.sendButton,
-                  !inputMessage.trim() && styles.sendButtonDisabled
-                ]}
-                onPress={handleSendMessage}
-                disabled={!inputMessage.trim() || isLoading}
+              <TouchableOpacity 
+                onPress={handleSendMessage} 
+                style={styles.sendButton}
+                disabled={!inputMessage.trim() || isTyping}
               >
                 <Ionicons 
                   name="send" 
                   size={20} 
-                  color={inputMessage.trim() ? "#FFF" : "#AAA"} 
+                  color={!inputMessage.trim() || isTyping ? "#666" : "#FF6B9C"} 
                 />
               </TouchableOpacity>
             </View>
-          </Animated.View>
+          </View>
         </KeyboardAvoidingView>
       </Modal>
-    </>
+    </View>
   );
 };
 
+// Styles
 const styles = StyleSheet.create({
-  floatingButton: {
+  container: {
     position: 'absolute',
     bottom: 80,
     right: 20,
-    zIndex: 999,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-    elevation: 5,
+    zIndex: 1000,
   },
-  buttonGradient: {
+  chatButton: {
     width: 60,
     height: 60,
     borderRadius: 30,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 3.84,
+    elevation: 5,
+  },
+  gradient: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 30,
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 15,
   },
   modalContainer: {
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
   },
   modalContent: {
-    backgroundColor: '#1E1E1E',
-    width: '90%',
-    maxWidth: 360,
-    height: 500,
-    borderRadius: 15,
+    flex: 1,
+    marginTop: 50,
+    backgroundColor: '#121212',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
     overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 10,
   },
   modalHeader: {
+    height: 60,
+    justifyContent: 'center',
+    paddingHorizontal: 20,
+  },
+  headerContent: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: 15,
-    backgroundColor: '#252525',
   },
-  modalTitle: {
+  headerTitle: {
+    color: 'white',
     fontSize: 18,
     fontWeight: 'bold',
-    color: '#FFF',
+  },
+  closeButton: {
+    padding: 5,
   },
   messagesContainer: {
+    flexGrow: 1,
     padding: 15,
-    paddingBottom: 10,
-    paddingTop: 10,
+    paddingBottom: 20,
   },
   messageContainer: {
-    marginVertical: 6,
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-  },
-  userMessageContainer: {
-    justifyContent: 'flex-end',
-    marginLeft: 50,
-  },
-  aiMessageContainer: {
-    justifyContent: 'flex-start',
-    marginRight: 50,
-  },
-  avatarContainer: {
-    marginRight: 8,
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    overflow: 'hidden',
-    backgroundColor: '#252525',
+    marginBottom: 12,
     alignItems: 'center',
-    justifyContent: 'center',
-  },
-  avatarGradient: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
   messageBubble: {
+    maxWidth: '80%',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
     borderRadius: 18,
-    padding: 10,
-    paddingVertical: 8,
-    maxWidth: '100%',
+    marginBottom: 3,
   },
   userBubble: {
-    backgroundColor: '#FF6B9C',
-    borderBottomRightRadius: 4,
-  },
-  aiBubble: {
     backgroundColor: '#2A2A2A',
-    borderBottomLeftRadius: 4,
+    borderBottomRightRadius: 5,
+    alignSelf: 'flex-end',
+  },
+  assistantBubble: {
+    backgroundColor: '#FF6B9C',
+    borderBottomLeftRadius: 5,
+    alignSelf: 'flex-start',
   },
   messageText: {
-    fontSize: 14,
-    lineHeight: 20,
-  },
-  userMessageText: {
-    color: '#FFF',
-  },
-  aiMessageText: {
-    color: '#FFF',
-  },
-  timestamp: {
-    fontSize: 9,
-    color: 'rgba(255,255,255,0.5)',
-    alignSelf: 'flex-end',
-    marginTop: 3,
+    color: 'white',
+    fontSize: 16,
+    lineHeight: 22,
   },
   typingIndicator: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#2A2A2A',
-    borderRadius: 16,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    alignSelf: 'flex-start',
     marginLeft: 15,
     marginBottom: 10,
   },
   typingText: {
-    color: '#FFF',
-    fontSize: 11,
-    marginRight: 6,
+    color: '#999',
+    fontSize: 14,
+    marginRight: 5,
+  },
+  typingDots: {
+    marginLeft: 5,
+  },
+  timestamp: {
+    color: '#999',
+    fontSize: 12,
+    marginVertical: 8,
+    alignSelf: 'center',
   },
   inputContainer: {
     flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    backgroundColor: '#252525',
+    padding: 15,
     borderTopWidth: 1,
-    borderTopColor: '#333',
+    borderTopColor: '#222',
+    backgroundColor: '#1A1A1A',
   },
   input: {
     flex: 1,
-    backgroundColor: '#1E1E1E',
+    backgroundColor: '#2A2A2A',
     borderRadius: 20,
-    paddingHorizontal: 16,
+    paddingHorizontal: 15,
     paddingVertical: 10,
-    paddingRight: 40,
-    color: '#FFF',
-    fontSize: 15,
-    maxHeight: 80,
+    maxHeight: 100,
+    color: 'white',
+    fontSize: 16,
   },
   sendButton: {
-    backgroundColor: '#FF6B9C',
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    alignItems: 'center',
     justifyContent: 'center',
-    position: 'absolute',
-    right: 20,
-  },
-  sendButtonDisabled: {
-    backgroundColor: '#444',
+    alignItems: 'center',
+    marginLeft: 10,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#2A2A2A',
   },
 });
 

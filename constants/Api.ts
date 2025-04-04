@@ -3,7 +3,7 @@ import * as SecureStore from 'expo-secure-store';
 // API URL configuration
 // Use environment variable if available, or fallback to default
 // Update to the correct IP address that matches your backend server
-export const API_URL = process.env.EXPO_PUBLIC_API_URL || 'http://localhost:5001';
+export const API_URL = process.env.EXPO_PUBLIC_API_URL || 'http://192.168.52.118:5001';
 
 // Storage keys
 export const STORAGE_KEYS = {
