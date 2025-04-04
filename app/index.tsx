@@ -1,16 +1,26 @@
 import React, { useEffect, useRef } from 'react';
-import { View, Text, StyleSheet, Image, TouchableOpacity, StatusBar, Animated, Dimensions, Easing } from 'react-native';
+import { View, Text, StyleSheet, Image, TouchableOpacity, StatusBar, Animated, Dimensions, Easing, ActivityIndicator } from 'react-native';
 import { useRouter } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
+import { useAppAuth } from '../context/AuthContext';
 
 const { width, height } = Dimensions.get('window');
 const circleSize = Math.max(width, height) * 2;
 
 export default function SplashScreen() {
   const router = useRouter();
+  const { isSignedIn, isLoaded } = useAppAuth();
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(50)).current;
   const circleAnim = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    // Check authentication status when loaded
+    if (isLoaded && isSignedIn) {
+      // If user is already signed in, redirect to home
+      router.replace('/home');
+    }
+  }, [isLoaded, isSignedIn]);
 
   useEffect(() => {
     // Circle reveal animation
@@ -48,6 +58,16 @@ export default function SplashScreen() {
   const handleGetStarted = () => {
     router.push('/auth/login');
   };
+
+  // Show loading indicator while checking auth status
+  if (!isLoaded) {
+    return (
+      <View style={[styles.container, styles.loadingContainer]}>
+        <StatusBar barStyle="light-content" backgroundColor="#121212" />
+        <ActivityIndicator size="large" color="#FF6B9C" />
+      </View>
+    );
+  }
 
   return (
     <View style={styles.container}>
@@ -103,6 +123,10 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#121212',
     paddingHorizontal: 20,
+    justifyContent: 'center',
+  },
+  loadingContainer: {
+    alignItems: 'center',
     justifyContent: 'center',
   },
   circleContainer: {

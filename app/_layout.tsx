@@ -1,9 +1,10 @@
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
+import { AuthProvider } from '../context/AuthContext';
 
 export default function Layout() {
   return (
-    <>
+    <AuthProvider>
       <StatusBar style="light" />
       <Stack
         screenOptions={{
@@ -18,6 +19,6 @@ export default function Layout() {
         <Stack.Screen name="auth/signup" />
         <Stack.Screen name="home" />
       </Stack>
-    </>
+    </AuthProvider>
   );
 }

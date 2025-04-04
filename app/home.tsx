@@ -24,6 +24,7 @@ import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
 import * as Location from 'expo-location';
 import * as Contacts from 'expo-contacts';
 import * as TaskManager from 'expo-task-manager';
+import { useAppAuth } from '../context/AuthContext';
 
 const { width } = Dimensions.get('window');
 
@@ -72,6 +73,7 @@ const getBatteryLevel = async () => {
 
 export default function HomeScreen() {
   const router = useRouter();
+  const { signOut } = useAppAuth();
   const [location, setLocation] = useState(null);
   const [errorMsg, setErrorMsg] = useState(null);
   const [activeTab, setActiveTab] = useState('Track Me');
@@ -498,6 +500,38 @@ export default function HomeScreen() {
     }
   };
 
+  // Handle logout
+  const handleLogout = async () => {
+    Alert.alert(
+      "Log Out",
+      "Are you sure you want to log out?",
+      [
+        { text: "Cancel", style: "cancel" },
+        { 
+          text: "Log Out", 
+          style: "destructive",
+          onPress: async () => {
+            try {
+              // Stop location tracking if active
+              if (isTracking) {
+                await stopLocationTracking();
+              }
+              
+              // Sign out using Clerk
+              await signOut();
+              
+              // Navigate to login screen
+              router.replace('/auth/login');
+            } catch (error) {
+              console.error('Logout error:', error);
+              Alert.alert('Error', 'Failed to log out. Please try again.');
+            }
+          }
+        }
+      ]
+    );
+  };
+
   return (
     <View style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#121212" />
@@ -732,6 +766,16 @@ export default function HomeScreen() {
           </View>
         </View>
       </Modal>
+
+      {/* Logout Button */}
+      <TouchableOpacity 
+        style={styles.logoutButton} 
+        onPress={handleLogout}
+        activeOpacity={0.7}
+      >
+        <Ionicons name="log-out-outline" size={24} color="#FF6B9C" />
+        <Text style={styles.logoutText}>Log Out</Text>
+      </TouchableOpacity>
     </View>
   );
 }
@@ -1328,5 +1372,22 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: 'bold',
     fontFamily: 'System',
+  },
+  logoutButton: {
+    position: 'absolute',
+    bottom: 20,
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 15,
+    borderRadius: 10,
+    backgroundColor: '#1A1A1A',
+  },
+  logoutText: {
+    color: '#FF6B9C',
+    fontSize: 16,
+    fontWeight: 'bold',
+    fontFamily: 'System',
+    marginLeft: 10,
   },
 }); 

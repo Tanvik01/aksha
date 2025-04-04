@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   View, 
   Text, 
@@ -10,18 +10,23 @@ import {
   StatusBar,
   Animated,
   Keyboard,
-  TouchableWithoutFeedback
+  ActivityIndicator,
+  Alert,
+  SafeAreaView
 } from 'react-native';
 import { Link, useRouter } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
+import { useSignIn } from '@clerk/clerk-expo';
 
 export default function LoginScreen() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   const router = useRouter();
-  const fadeAnim = new Animated.Value(0);
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const { signIn, setActive, isLoaded } = useSignIn();
 
   useEffect(() => {
     Animated.timing(fadeAnim, {
@@ -29,18 +34,83 @@ export default function LoginScreen() {
       duration: 800,
       useNativeDriver: true,
     }).start();
+
+    // Add keyboard listeners to adjust UI when keyboard appears/disappears
+    const keyboardDidShowListener = Keyboard.addListener(
+      'keyboardDidShow',
+      () => {
+        // Keyboard is shown - you can adjust UI here if needed
+      }
+    );
+    const keyboardDidHideListener = Keyboard.addListener(
+      'keyboardDidHide',
+      () => {
+        // Keyboard is hidden - you can adjust UI here if needed
+      }
+    );
+
+    // Clean up listeners
+    return () => {
+      keyboardDidShowListener.remove();
+      keyboardDidHideListener.remove();
+    };
   }, []);
 
-  const handleLogin = () => {
-    // Implement your login logic here
-    router.replace('/home');
+  const handleLogin = async () => {
+    if (!isLoaded) {
+      return;
+    }
+
+    // Dismiss keyboard when submitting
+    Keyboard.dismiss();
+
+    try {
+      setIsLoading(true);
+      
+      // Validate email and password
+      if (!email || !password) {
+        Alert.alert('Error', 'Please fill in all fields');
+        setIsLoading(false);
+        return;
+      }
+      
+      // Start the sign-in process with Clerk
+      const { createdSessionId, status, firstFactorVerification } = 
+        await signIn.create({
+          identifier: email,
+          password,
+        });
+      
+      if (firstFactorVerification.status === 'failed') {
+        Alert.alert('Error', firstFactorVerification.error?.message || 'Invalid credentials');
+        setIsLoading(false);
+        return;
+      }
+      
+      if (status === 'complete') {
+        // Set the new session as active
+        await setActive({ session: createdSessionId });
+        // Redirect to home page
+        router.replace('/home');
+      }
+      
+    } catch (error: any) {
+      console.error('Login error:', error);
+      Alert.alert(
+        'Login Failed', 
+        error?.errors?.[0]?.message || 'Please check your credentials and try again'
+      );
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   return (
-    <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: '#121212' }}>
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        style={{ flex: 1, backgroundColor: '#121212' }}
+        style={{ flex: 1 }}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 40 : 0}
       >
         <StatusBar barStyle="light-content" backgroundColor="#121212" />
         
@@ -70,6 +140,7 @@ export default function LoginScreen() {
                   keyboardType="email-address"
                   autoCapitalize="none"
                   selectionColor="#FF6B9C"
+                  editable={!isLoading}
                 />
               </View>
             </View>
@@ -86,10 +157,12 @@ export default function LoginScreen() {
                   onChangeText={setPassword}
                   secureTextEntry={!showPassword}
                   selectionColor="#FF6B9C"
+                  editable={!isLoading}
                 />
                 <TouchableOpacity 
                   onPress={() => setShowPassword(!showPassword)}
                   style={styles.eyeIcon}
+                  disabled={isLoading}
                 >
                   <Ionicons 
                     name={showPassword ? "eye-off-outline" : "eye-outline"} 
@@ -100,25 +173,33 @@ export default function LoginScreen() {
               </View>
             </View>
 
-            <TouchableOpacity style={styles.forgotPassword}>
+            <TouchableOpacity style={styles.forgotPassword} disabled={isLoading}>
               <Text style={styles.forgotPasswordText}>Forgot Password?</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity onPress={handleLogin} activeOpacity={0.8}>
+            <TouchableOpacity 
+              onPress={handleLogin} 
+              activeOpacity={0.8} 
+              disabled={isLoading}
+            >
               <LinearGradient
                 colors={['#FF6B9C', '#F24976']}
                 start={{ x: 0, y: 0 }}
                 end={{ x: 1, y: 0 }}
                 style={styles.button}
               >
-                <Text style={styles.buttonText}>Login</Text>
+                {isLoading ? (
+                  <ActivityIndicator color="#fff" size="small" />
+                ) : (
+                  <Text style={styles.buttonText}>Login</Text>
+                )}
               </LinearGradient>
             </TouchableOpacity>
 
             <View style={styles.signupContainer}>
               <Text style={styles.signupText}>Don't have an account? </Text>
               <Link href="/auth/signup" asChild>
-                <TouchableOpacity>
+                <TouchableOpacity disabled={isLoading}>
                   <Text style={styles.signupLink}>Sign Up</Text>
                 </TouchableOpacity>
               </Link>
@@ -126,7 +207,7 @@ export default function LoginScreen() {
           </View>
         </Animated.View>
       </KeyboardAvoidingView>
-    </TouchableWithoutFeedback>
+    </SafeAreaView>
   );
 }
 
@@ -135,7 +216,7 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#121212',
     paddingHorizontal: 20,
-    paddingTop: 60,
+    paddingTop: Platform.OS === 'ios' ? 20 : 60,
     paddingBottom: 40,
   },
   backButton: {
